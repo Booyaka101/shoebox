@@ -12,6 +12,8 @@ Status: **v1.0.0 complete and verified end-to-end.** (2026-10-03)
   sharpness_in/out, errors, flags`, plus dimensions)
 - Stage-based model residency with `torch.cuda.empty_cache()` between stages;
   CPU fallback with a warning surfaced as a UI banner
+- RealESRGAN x2 tiled background verified end to end (restored faces pasted
+  onto the upscaled background, outputs 2x)
 - FastAPI on 127.0.0.1:8545 + single-page vanilla JS UI: folder picker
   (native dialog or typed path), presets, toggles, live stage/progress, model
   download progress, cancel, before/after slider gallery, flagged queue with
@@ -30,12 +32,19 @@ Status: **v1.0.0 complete and verified end-to-end.** (2026-10-03)
   committed, release zip at `dist/shoebox-1.0.0.zip`
 - Tests: 17 passed (real E2E over the 5 LOC Families photos + unit + mock)
 
-## Real end-to-end run (the one to beat)
+## Real end-to-end runs (the ones to beat)
 
-Job `20261003-122430-d1dd59`, folder of 5 LOC scans + corrupt file + stem
-collision, balanced preset, colorize on: **restored 6, flagged 2, skipped 1,
-originals byte-identical (SHA-256 checked), gallery + export verified in the
-browser.** Output in `results/20261003-122430-d1dd59/`.
+- Job `20261003-124214-89d303` — 5 LOC scans + corrupt file, balanced
+  preset, colorize + 2x upscale: **restored 5, flagged 3, skipped 1**;
+  the 1939 sisters photo (grayscale, 2 faces) came out colorized, restored,
+  1448×2048, faces 2→2, zero flags. Originals byte-identical.
+- Job `20261003-122430-d1dd59` — same corpus without upscale, plus a
+  same-stem collision: restored 6, flagged 2, skipped 1; the
+  `x.jpg`/`x.jpeg` pair got the content-hash suffix; re-run at higher
+  fidelity verified on the flagged photo.
+
+Both galleries verified in the browser (headless Chrome + API), export
+verified, Immich-unreachable error path verified. Output in `results/`.
 
 ## Next steps (concrete)
 

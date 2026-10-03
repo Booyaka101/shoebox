@@ -294,7 +294,7 @@ def _face_stage(info, helper, net, bg, device, w, upscale_bg):
         helper.get_inverse_affine(None)
         paste_kwargs = {}
         if bg is not None:
-            paste_kwargs = {'upsample_img': bg_img, 'face_upsample': bg}
+            paste_kwargs = {'upsample_img': bg_img, 'face_upsampler': bg}
         info['img_final'] = helper.paste_faces_to_input_image(**paste_kwargs)
     except Exception as err:
         log.warning('paste-back failed for %s: %s', info['name'], err)

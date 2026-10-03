@@ -27,6 +27,8 @@ import uuid
 import webbrowser
 from pathlib import Path
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -40,7 +42,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RESULTS_DIR = PROJECT_ROOT / 'results'
 WEB_DIR = PROJECT_ROOT / 'web'
 
-app = FastAPI(title='shoebox', version=__version__,
+
+@asynccontextmanager
+async def lifespan(_app):
+    RESULTS_DIR.mkdir(exist_ok=True)
+    _load_last_job()
+    yield
+
+
+app = FastAPI(title='shoebox', version=__version__, lifespan=lifespan,
               description='Free, local, batch photo-archive restorer.')
 
 JOBS = {}            # job_id -> job dict (also mirrored to job.json)
@@ -398,12 +408,6 @@ def pick_folder():
 @app.get('/')
 def index():
     return FileResponse(WEB_DIR / 'index.html')
-
-
-@app.on_event('startup')
-def _startup():
-    RESULTS_DIR.mkdir(exist_ok=True)
-    _load_last_job()
 
 
 def main():

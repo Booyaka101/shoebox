@@ -49,18 +49,22 @@ http://127.0.0.1:8545 in your browser.
    **Push to Immich** uploads it to your own Immich server.
 
 A real run (the five LOC sample photos in `examples/loc-families/`, plus a
-corrupt file and a same-name collision) on an RTX 4090:
+corrupt file) on an RTX 4090, balanced preset, colorize and 2x upscale on:
 
 ```
-job 20261003-122430-d1dd59: balanced preset, colorize on
-  restored: 6   flagged: 2   skipped: 1
-  1936-migrant-family-nipomo.jpg   faces 4→2  sharp 961→973   flagged
-  1939-sisters-san-antonio.jpg     faces 2→2  sharp 430→435   clean
-  1940-chamisal-family-dinner.jpg  faces 3→3  sharp 1304→1302 clean
-  1942-greenbelt-family-stroll.jpg faces 3→3  sharp 1389→1386 clean
-  1943-grimm-children-kitchen.jpg  faces 2→1  sharp 596→598   flagged
-  torn-photo.jpg                   skipped: unreadable or corrupt image data
+job 20261003-124214-89d303
+  restored: 5   flagged: 3   skipped: 1
+  1936-migrant-family-nipomo.jpg   faces 4→1  flagged (faces, sharpness)
+  1939-sisters-san-antonio.jpg     faces 2→2  sharp 430→382   clean
+  1940-chamisal-family-dinner.jpg  faces 3→3  sharp 1304→872  flagged (sharpness)
+  1942-greenbelt-family-stroll.jpg faces 3→3  sharp 1389→1192 clean
+  1943-grimm-children-kitchen.jpg  faces 2→1  sharp 596→379   flagged (faces, sharpness)
+  corrupt.jpg                      skipped: unreadable or corrupt image data
 ```
+
+Outputs are 2x the input size with upscale on (724×1024 → 1448×2048). The
+sharpness flag fires on photos where RealESRGAN's smoothing outpaces the
+detail gain at 2x — advisory, for you to judge in the gallery.
 
 Every restored photo gets a sidecar `.json` next to it recording what was
 done: source hash, models, preset, face counts in/out, sharpness in/out,
