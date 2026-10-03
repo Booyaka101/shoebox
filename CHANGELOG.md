@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.2 — 2026-10-03
+
+Second review loop: archive fidelity and launcher polish.
+
+- Restored JPEGs and TIFFs now keep the source photo's EXIF (dates, camera,
+  GPS) so Immich timelines survive the restore; the Orientation tag is
+  stripped because the restore bakes the rotation into the pixels. PNG
+  outputs stay EXIF-free by design.
+- run.bat detects the GPU: no NVIDIA card means the CPU PyTorch build is
+  installed instead of the 2.5 GB CUDA one; failed installs now explain
+  themselves and pause instead of vanishing.
+- "Port already in use" prints a friendly hint instead of a stack trace.
+- Exports now include each photo's sidecar JSON next to the image.
+- Jobs warn (in the UI) when photos above 24 megapixels will be slow.
+- Tests: 26 (EXIF kept / orientation stripped / export sidecar cases).
+
 ## 1.0.1 — 2026-10-03
 
 Review-pass fixes and enhancements.

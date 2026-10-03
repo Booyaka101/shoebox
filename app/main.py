@@ -129,7 +129,7 @@ def _make_sink(job, job_dir):
     restored_dir = Path(job_dir) / 'restored'
     restored_dir.mkdir(parents=True, exist_ok=True)
 
-    def sink(name, stem, ext, src_hash, meta, data):
+    def sink(name, stem, ext, src_hash, meta, data, exif=None):
         out_path = pipeline.output_name(job_dir, stem, ext, src_hash)
         out_path.write_bytes(data)
         sidecar = out_path.parent / (out_path.stem + '.json')
@@ -283,7 +283,7 @@ def rerun(req: RerunRequest):
         old_output = entry['output'] if entry else None
         written = {}
 
-        def sink(name, stem, ext, src_hash, meta, data):
+        def sink(name, stem, ext, src_hash, meta, data, exif=None):
             job_dir = _job_dir(job['id'])
             out_path = pipeline.output_name(job_dir, stem, ext, src_hash)
             out_path.write_bytes(data)
@@ -393,6 +393,9 @@ def export(req: ExportRequest):
         src = restored_dir / entry['output']
         if src.is_file():
             shutil.copy2(src, export_dir / entry['output'])
+            sidecar = src.parent / (Path(entry['output']).stem + '.json')
+            if sidecar.is_file():
+                shutil.copy2(sidecar, export_dir / sidecar.name)
             copied += 1
     return {'exported': copied, 'to': str(export_dir)}
 
@@ -497,7 +500,22 @@ def main():
     # SelectorEventLoop avoids the Windows proactor ConnectionResetError spam
     # when browsers drop image range requests
     threading.Timer(1.2, lambda: webbrowser.open(f'http://127.0.0.1:{port}')).start()
-    uvicorn.run(app, host='127.0.0.1', port=port, loop='asyncio:SelectorEventLoop', log_level='info')
+    try:
+        uvicorn.run(app, host='127.0.0.1', port=port,
+                    loop='asyncio:SelectorEventLoop', log_level='info')
+    except SystemExit:
+        # uvicorn logs the bind error itself and sys.exit()s
+        print(f'\nPort {port} is already in use — shoebox is probably already '
+              f'running. Open http://127.0.0.1:{port} in your browser, or set '
+              'SHOEBOX_PORT to another port.')
+        return
+    except OSError as err:
+        if '10048' in str(err) or 'address already in use' in str(err).lower():
+            print(f'\nPort {port} is already in use — shoebox is probably '
+                  f'already running. Open http://127.0.0.1:{port} in your '
+                  'browser, or set SHOEBOX_PORT to another port.')
+            return
+        raise
 
 
 if __name__ == '__main__':

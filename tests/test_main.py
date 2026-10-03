@@ -143,6 +143,9 @@ def test_export_wipes_stale_files(client, tmp_path):
     assert r.status_code == 200
     assert r.json()['exported'] == 1
     assert not stale.exists(), 'stale export files must not survive a re-export'
+    exported = sorted(p.name for p in export_dir.iterdir())
+    assert 'a_restored.png' in exported
+    assert 'a_restored.json' in exported, 'sidecar metadata should travel with the export'
 
 
 def test_reveal_rejects_bad_target_and_missing_folder(client, tmp_path):

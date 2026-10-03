@@ -1,8 +1,19 @@
 # PROGRESS — shoebox
 
-Status: **v1.0.1 complete and verified end-to-end.** (2026-10-03)
+Status: **v1.0.2 complete and verified end-to-end.** (2026-10-03)
 
-## 1.0.1 review loop (this round)
+## 1.0.2 review loop (this round)
+
+- EXIF preservation: restored JPEG/TIFF keep source dates/camera/GPS (Immich
+  timelines survive); Orientation tag stripped (imdecode bakes the rotation
+  into pixels); Pillow encode with cv2 fallback. Verified by round-trip test.
+- run.bat: GPU detection (nvidia-smi) picks CPU vs CUDA torch wheels; failed
+  installs now explain themselves and pause
+- Friendly "port already in use" message instead of a stack trace
+- Export includes sidecar JSONs; job warning for >24MP scans
+- Tests: 26/26
+
+## 1.0.1 review loop
 
 - Crash resilience: per-photo incremental writes to restored/; interrupted
   jobs recover cleanly on restart (verified live: mid-job kill → restart →

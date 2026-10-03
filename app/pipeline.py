@@ -22,16 +22,43 @@ unprocessed ones as status 'cancelled' rather than failing them.
 """
 
 import hashlib
+import io
 import logging
 import threading
 from pathlib import Path
 
 import cv2
 import numpy as np
+from PIL import Image
 
 from . import models, qa
 
 log = logging.getLogger(__name__)
+
+PIL_FORMATS = {'.jpg': 'JPEG', '.jpeg': 'JPEG', '.png': 'PNG', '.tif': 'TIFF',
+               '.tiff': 'TIFF', '.bmp': 'BMP', '.webp': 'WEBP'}
+
+ORIENTATION_TAG = 274  # baked into the pixels by imdecode; must not survive
+
+
+def source_exif(path) -> bytes | None:
+    """EXIF of the source scan, minus Orientation.
+
+    cv2.imdecode applies the EXIF rotation, so the restored pixels are
+    upright — copying the tag would make other tools rotate them again.
+    Everything else (dates, camera, GPS) is kept for archives and Immich
+    timelines. Returns None for files without EXIF or on any read error.
+    """
+    try:
+        with Image.open(path) as im:
+            exif = im.getexif()
+            if not exif:
+                return None
+            exif.pop(ORIENTATION_TAG, None)
+            return exif.tobytes() or None
+    except Exception as err:
+        log.debug('no EXIF read from %s: %s', path, err)
+        return None
 
 PRESETS = {
     # fidelity_weight: CodeFormer's w dial — higher = stay closer to the
@@ -92,7 +119,22 @@ def output_name(job_dir, stem: str, ext: str, src_hash: str):
     return base
 
 
-def encode_image(img_bgr, ext: str) -> bytes:
+def encode_image(img_bgr, ext: str, exif_bytes: bytes = None) -> bytes:
+    """JPEG/TIFF go through Pillow so source EXIF (minus orientation) rides
+    along; any Pillow failure falls back to the plain OpenCV encode."""
+    if ext in ('.jpg', '.jpeg', '.tif', '.tiff') and exif_bytes:
+        try:
+            rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+            im = Image.fromarray(rgb)
+            params = {'exif': exif_bytes}
+            if ext in ('.jpg', '.jpeg'):
+                params['quality'] = 95
+                params['subsampling'] = 1  # 4:2:2, like cv2's default
+            buf = io.BytesIO()
+            im.save(buf, format=PIL_FORMATS[ext], **params)
+            return buf.getvalue()
+        except Exception as err:
+            log.warning('EXIF-preserving encode failed (%s); writing without EXIF', err)
     params = [cv2.IMWRITE_JPEG_QUALITY, 95] if ext in ('.jpg', '.jpeg') else []
     ok, buf = cv2.imencode(ext, img_bgr, params)
     if not ok:
@@ -132,6 +174,7 @@ def run_pipeline(paths, preset, colorize, upscale_bg, sink, work_state=None, can
             'src_hash': sha256_of(path),
             'errors': [],
             'status': 'pending',
+            'exif': source_exif(path),
         }
         try:
             img_in = read_image_bgr(path)
@@ -151,6 +194,13 @@ def run_pipeline(paths, preset, colorize, upscale_bg, sink, work_state=None, can
         info['_img'] = img_in
         infos.append(info)
     report('reading', len(paths), len(paths))
+    big = [n for n in infos if n['status'] == 'pending'
+           and n['w_in'] * n['h_in'] > 24_000_000]
+    if big and work_state is not None:
+        names = ', '.join(n['name'] for n in big[:3])
+        work_state.setdefault('warnings', []).append(
+            f'{len(big)} photo(s) above 24 megapixels ({names}) will take '
+            'noticeably longer, especially with background upscaling.')
 
     # stage 1: colorization (DeOldify artistic)
     to_color = [n for n in infos if n['status'] == 'pending' and n['colorize_needed']]
@@ -189,7 +239,7 @@ def run_pipeline(paths, preset, colorize, upscale_bg, sink, work_state=None, can
                 try:
                     _restore_one(info, helper, net, bg, device, w, upscale_bg)
                     _finish_one(info, preset, w, render_factor, colorize, upscale_bg)
-                    data = encode_image(info.pop('_final'), info['ext'])
+                    data = encode_image(info.pop('_final'), info['ext'], info.get('exif'))
                     sink(info['name'], info['stem'], info['ext'],
                          info['src_hash'], info['meta'], data)
                     info['status'] = 'done'

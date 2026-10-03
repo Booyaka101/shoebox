@@ -54,6 +54,11 @@ start and everything else keeps working. Memory use stays flat no matter
 how large the folder is. The **Previous jobs** dropdown reopens any past
 job's gallery.
 
+Restored JPEGs and TIFFs keep the source photo's EXIF (dates, camera, GPS —
+Immich timelines stay intact), minus the orientation tag, which is baked
+into the pixels by the restore. Outputs of PNG/TIFF/BMP/WebP inputs are
+written as PNG and carry no EXIF.
+
 A real run (the five LOC sample photos in `examples/loc-families/`, plus a
 corrupt file) on an RTX 4090, balanced preset, colorize and 2x upscale on:
 
@@ -147,10 +152,29 @@ before selling anything built on it.
   inversion, no video
 - Face restoration is tuned for old scans of people; landscapes only get
   colorization and (optionally) upscaling
-- Very large TIFFs decode to 8-bit; huge photos slow RealESRGAN's tiled pass
+- Very large TIFFs decode to 8-bit; photos above 24 megapixels trigger a
+  slow-run warning, and RealESRGAN's tiled pass still needs its time
+- PNG, BMP and WebP outputs carry no EXIF (JPEG and TIFF do)
 - On GPU-less machines everything works but slowly
 - The QA face-count check is a heuristic: profile faces lost in restoration
   are flagged even when the result looks fine to a human
+
+## Troubleshooting
+
+- **"Python 3.11 is required"** — python.org installer, tick "Add python.exe
+  to PATH", then run `run.bat` again.
+- **Windows protected your PC** — run.bat is a plain script; click *More
+  info* → *Run anyway*.
+- **"No NVIDIA GPU detected"** — run.bat installs the CPU build; expect
+  minutes per photo instead of seconds.
+- **CUDA errors in the console / CPU banner in the UI** — usually a driver
+  too old for the CUDA 12.6 wheels; update the NVIDIA driver, or force CPU
+  with `set SHOEBOX_DEVICE=cpu` before starting.
+- **Port already in use** — shoebox is already running; open
+  http://127.0.0.1:8545, or `set SHOEBOX_PORT=8546` first.
+- **A model download stopped halfway** — delete the matching `.part` file in
+  `weights\` (or just run again; partial files are cleaned automatically)
+  and start the job once more.
 
 ## Tests
 

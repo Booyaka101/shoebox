@@ -57,7 +57,21 @@ def run(tmp_path_factory):
     restored.mkdir()
     written = {}
 
-    def sink(name, stem, ext, src_hash, meta, data):
+    # EXIF carriers: one with DateTime only, one with an Orientation tag —
+    # imdecode bakes that rotation into the pixels, so the output must keep
+    # the dates but DROP the orientation tag (or other tools double-rotate)
+    from PIL import Image
+    exif_src = folder / 'with-exif.jpg'
+    im = Image.open(COLORIZE_FILES[0]).convert('RGB')
+    ex = Image.Exif()
+    ex[306] = '1961:07:14 12:00:00'
+    im.save(exif_src, 'JPEG', quality=92, exif=ex.tobytes())
+    rot_src = folder / 'rotated-exif.jpg'
+    ex2 = Image.Exif()
+    ex2[274] = 6
+    im.save(rot_src, 'JPEG', quality=92, exif=ex2.tobytes())
+
+    def sink(name, stem, ext, src_hash, meta, data, exif=None):
         out = pipeline.output_name(work, stem, ext, src_hash)
         out.write_bytes(data)
         out.parent.joinpath(out.stem + '.json').write_text(json.dumps(meta))
@@ -197,6 +211,18 @@ def test_face_restoration_failure_is_flagged_not_passed_through(run, monkeypatch
     assert info['status'] == 'done', 'restored copy must still be produced'
     assert sink_out.get('data'), 'output bytes must reach the sink'
     assert any('restoration failed' in e for e in meta['errors'])
+
+
+def test_exif_dates_kept_and_orientation_stripped(run):
+    from PIL import Image
+    # dates and camera metadata survive the restore
+    out = run['restored'].parent / 'restored' / run['written']['with-exif.jpg']
+    exif = Image.open(out).getexif()
+    assert exif.get(306) == '1961:07:14 12:00:00'
+    # orientation was baked into the pixels by the decode, so the tag itself
+    # must be gone (or every other tool would rotate the upright output)
+    rot = run['restored'].parent / 'restored' / run['written']['rotated-exif.jpg']
+    assert 274 not in Image.open(rot).getexif()
 
 
 def test_qa_rules_unit():
