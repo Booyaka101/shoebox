@@ -20,6 +20,7 @@ Endpoints (all JSON unless noted):
 
 import json
 import logging
+import queue
 import shutil
 import threading
 import time
@@ -33,7 +34,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-from . import __version__, immich, models, pipeline
+from . import __version__, immich, models, pipeline, sheet
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
 log = logging.getLogger('shoebox')
@@ -47,6 +48,7 @@ WEB_DIR = PROJECT_ROOT / 'web'
 async def lifespan(_app):
     RESULTS_DIR.mkdir(exist_ok=True)
     _load_last_job()
+    threading.Thread(target=_worker, daemon=True).start()
     yield
 
 
@@ -56,6 +58,25 @@ app = FastAPI(title='shoebox', version=__version__, lifespan=lifespan,
 JOBS = {}            # job_id -> job dict (also mirrored to job.json)
 JOBS_LOCK = threading.Lock()
 _active_job_id = None
+_job_queue: queue.Queue = queue.Queue()
+
+
+def _worker():
+    """Runs queued jobs one at a time, in submission order. A job cancelled
+    while still queued is skipped — the re-check under the lock closes the
+    race where /cancel lands between dequeue and the status overwrite."""
+    while True:
+        job, job_dir = _job_queue.get()
+        try:
+            with pipeline.PIPELINE_LOCK:
+                if job['status'] == 'cancelled':
+                    _save_job(job, job_dir)
+                    continue
+                _run_job_thread(job, job_dir)
+        except Exception:
+            log.exception('worker failed on job %s', job['id'])
+        finally:
+            _job_queue.task_done()
 
 
 # ---------------------------------------------------------------- job store
@@ -151,31 +172,52 @@ def _run_job_thread(job, job_dir):
     global _active_job_id
     try:
         folder = Path(job['folder'])
-        paths = pipeline.find_images(folder)
+        if job.get('remaining'):
+            # resuming a paused job: only what is left over
+            paths = [folder / name for name in job['remaining']
+                     if (folder / name).is_file()]
+        else:
+            paths = pipeline.find_images(folder)
         if not paths:
             job['status'] = 'error'
             job['warnings'].append(f'no supported images (jpg/png/tif/bmp/webp) in {folder}')
             return
         job['total'] = len(paths)
         job['status'] = 'running'
-        job['skipped'] = []
-        job['cancelled'] = []
-        job['results'] = []
+        job['stage'] = 'starting'
+        job['remaining'] = []
+        job['skipped'] = job.get('skipped', [])
+        job['cancelled'] = job.get('cancelled', [])
+        job['results'] = job.get('results', [])
+        job['done'] = len(job['results'])
 
-        def progress(stage, done, total):
+        def progress(stage, done, total, current=None):
             job['stage'], job['stage_done'], job['stage_total'] = stage, done, total
+            if current is not None:
+                job['current'] = current
             _save_job(job, job_dir)
 
         infos = pipeline.run_pipeline(
             paths, job['preset'], job['colorize'], job['upscale_bg'],
-            sink=_make_sink(job, job_dir), work_state=job, cancel=job['cancel'])
+            sink=_make_sink(job, job_dir), work_state=job, cancel=job['cancel'],
+            pause=job['pause'])
 
-        job['status'] = 'cancelled' if job['cancel']['flag'] else 'done'
+        resumed_anyway = job['pause']['flag'] and not any(
+            i['status'] == 'paused' for i in infos)
+        if job['cancel']['flag']:
+            job['status'] = 'cancelled'
+        elif job['pause']['flag'] and not resumed_anyway:
+            job['status'] = 'paused'
+        else:
+            job['status'] = 'done'
+            job['remaining'] = []
         for info in infos:
             if info['status'] == 'skipped':
                 job['skipped'].append({'name': info['name'], 'reason': info['reason']})
             elif info['status'] == 'cancelled':
                 job['cancelled'].append(info['name'])
+            elif info['status'] == 'paused':
+                job['remaining'].append(info['name'])
         flagged = sum(1 for r in job['results'] if r['flags'])
         job['summary'] = {'restored': len(job['results']), 'flagged': flagged,
                           'skipped': len(job['skipped']),
@@ -210,34 +252,35 @@ def create_job(req: JobRequest):
         raise HTTPException(400, f'not a folder: {folder}')
     if req.preset not in pipeline.PRESETS:
         raise HTTPException(400, f'preset must be one of {pipeline.PRESET_ORDER}')
-    with pipeline.PIPELINE_LOCK:
-        running = [j for j in JOBS.values() if j['status'] in ('queued', 'running')]
-        if running:
-            raise HTTPException(409, f'job {running[0]["id"]} is already running')
-        job = {
-            'id': time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6],
-            'folder': str(folder),
-            'folder_name': folder.name,
-            'preset': req.preset,
-            'colorize': req.colorize,
-            'upscale_bg': req.upscale_bg,
-            'status': 'queued',
-            'stage': 'starting', 'stage_done': 0, 'stage_total': 0,
-            'done': 0, 'total': 0,
-            'started': time.time(), 'finished': None,
-            'device': models.device_name(),
-            'device_warning': models.device_warning(),
-            'warnings': [], 'skipped': [], 'cancelled': [], 'results': [],
-            'cancel': {'flag': False},
-            'version': __version__,
-        }
-        JOBS[job['id']] = job
-        _active_job_id = job['id']
-        job_dir = _job_dir(job['id'])
-        _save_job(job, job_dir)
-        threading.Thread(target=_run_job_thread, args=(job, job_dir),
-                         daemon=True).start()
-        return {'job_id': job['id'], 'status': job['status']}
+    running = [j for j in JOBS.values() if j['status'] in ('queued', 'running')]
+    if len(running) >= 8:
+        raise HTTPException(409, 'too many queued jobs (8) — resume or delete some first')
+    job = {
+        'id': time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6],
+        'folder': str(folder),
+        'folder_name': folder.name,
+        'preset': req.preset,
+        'colorize': req.colorize,
+        'upscale_bg': req.upscale_bg,
+        'status': 'queued',
+        'stage': 'queued', 'stage_done': 0, 'stage_total': 0,
+        'done': 0, 'total': 0,
+        'started': time.time(), 'finished': None,
+        'device': models.device_name(),
+        'device_warning': models.device_warning(),
+        'warnings': [], 'skipped': [], 'cancelled': [], 'results': [],
+        'remaining': [],
+        'cancel': {'flag': False},
+        'pause': {'flag': False},
+        'version': __version__,
+    }
+    JOBS[job['id']] = job
+    _active_job_id = job['id']
+    job_dir = _job_dir(job['id'])
+    _save_job(job, job_dir)
+    _job_queue.put((job, job_dir))
+    return {'job_id': job['id'], 'status': job['status'],
+            'queued_behind': len(running)}
 
 
 @app.get('/status')
@@ -320,8 +363,67 @@ class CancelRequest(BaseModel):
 @app.post('/cancel')
 def cancel(req: CancelRequest):
     job = _get_job(req.job_id)
+    if job['status'] == 'queued':
+        # the flag matters even here: the worker may have already dequeued
+        # this job and be about to overwrite the status with 'running'
+        job['cancel']['flag'] = True
+        job['status'] = 'cancelled'
+        job['summary'] = {'restored': 0, 'flagged': 0, 'skipped': 0, 'cancelled': 0}
+        _save_job(job)
+        return {'job_id': job['id'], 'status': 'cancelled'}
+    if job['status'] != 'running':
+        raise HTTPException(409, f'cannot cancel a {job["status"]} job')
     job['cancel']['flag'] = True
     return {'job_id': job['id'], 'status': job['status']}
+
+
+class PauseRequest(BaseModel):
+    job_id: str
+
+
+@app.post('/pause')
+def pause(req: PauseRequest):
+    job = _get_job(req.job_id)
+    if job['status'] != 'running':
+        raise HTTPException(409, f'cannot pause a {job["status"]} job')
+    job['pause']['flag'] = True
+    return {'job_id': job['id'], 'status': 'pausing'}
+
+
+@app.post('/resume')
+def resume(req: PauseRequest):
+    job = _get_job(req.job_id)
+    if job['status'] != 'paused':
+        raise HTTPException(409, f'cannot resume a {job["status"]} job')
+    if not job.get('remaining'):
+        raise HTTPException(400, 'nothing left to resume — every photo was processed')
+    job['status'] = 'queued'
+    job['stage'] = 'queued'
+    job['pause'] = {'flag': False}
+    job['cancel'] = {'flag': False}
+    job['finished'] = None
+    _save_job(job)
+    _job_queue.put((job, _job_dir(job['id'])))
+    return {'job_id': job['id'], 'status': 'queued',
+            'remaining': len(job['remaining'])}
+
+
+class DeleteRequest(BaseModel):
+    job_id: str
+
+
+@app.post('/delete')
+def delete_job(req: DeleteRequest):
+    job = _get_job(req.job_id)
+    if job['status'] in ('queued', 'running', 'pausing'):
+        raise HTTPException(409, 'stop the job before deleting it')
+    global _active_job_id
+    with JOBS_LOCK:
+        JOBS.pop(job['id'], None)
+        if _active_job_id == job['id']:
+            _active_job_id = None
+    shutil.rmtree(_job_dir(job['id']), ignore_errors=True)
+    return {'deleted': job['id']}
 
 
 @app.get('/pairs')
@@ -470,6 +572,24 @@ def immich_push(req: ImmichRequest):
         raise HTTPException(502, str(err))
     return {'album': album_name, 'uploaded': uploaded, 'already_in_album': already,
             'retry_queued': queued, 'added_to_album': added}
+
+
+class ContactSheetRequest(BaseModel):
+    job_id: str
+
+
+@app.post('/contactsheet')
+def contactsheet(req: ContactSheetRequest):
+    job = _get_job(req.job_id)
+    job_dir = _job_dir(job['id'])
+    restored_dir = job_dir / 'restored'
+    files = [restored_dir / r['output'] for r in job.get('results', [])]
+    files = [f for f in files if f.is_file()]
+    if not files:
+        raise HTTPException(400, 'nothing restored yet for this job')
+    out = job_dir / 'contact-sheet.pdf'
+    pages = sheet.build(files, out)
+    return {'pages': pages, 'photos': len(files), 'to': str(out)}
 
 
 @app.get('/pick_folder')

@@ -1,8 +1,26 @@
 # PROGRESS — shoebox
 
-Status: **v1.0.2 complete and verified end-to-end.** (2026-10-03)
+Status: **v1.0.3 complete and verified end-to-end.** (2026-10-03)
 
-## 1.0.2 review loop (this round)
+## 1.0.3 review loop (this round)
+
+- Pause/resume: pause stops after the current photo and records the
+  remainder; resume finishes it into the same job. Verified live with real
+  models (paused during colorization with 5 remaining → resumed → done).
+- Multi-folder queue: submissions while a job runs are queued (max 8) and
+  run in order by a single worker.
+- Delete old jobs (refuses while queued/running); contact-sheet PDF
+  (12 labelled thumbnails/page); current-photo display; `undefined`
+  metadata fallback in gallery cards.
+- Fixed a real race the new tests exposed: cancelling a job the worker had
+  just dequeued was overwritten by the job's own start-up (`cancelled` →
+  `running`), so it ran to completion. Cancelling a queued job now also
+  raises the pipeline cancel flag, and the worker re-checks the status
+  under the lock. Stress-verified 5 consecutive green module runs (was
+  failing ~1 in 3).
+- Tests: 32/32.
+
+## 1.0.2 review loop
 
 - EXIF preservation: restored JPEG/TIFF keep source dates/camera/GPS (Immich
   timelines survive); Orientation tag stripped (imdecode bakes the rotation

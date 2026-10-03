@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import main as app_main
+from app import sheet
 
 
 @pytest.fixture()
@@ -29,13 +30,24 @@ def client(tmp_path, monkeypatch):
 
 
 def _fake_run_pipeline(paths, preset, colorize, upscale_bg, sink,
-                       work_state=None, cancel=None):
+                       work_state=None, cancel=None, pause=None):
+    import time
     import numpy as np
+    import cv2
     out = []
     for i, p in enumerate(paths):
         if work_state is not None:
-            work_state['stage'], work_state['stage_done'], work_state['stage_total'] = \
-                'restoring faces', i, len(paths)
+            work_state['stage'] = 'restoring faces'
+            work_state['stage_done'] = i
+            work_state['stage_total'] = len(paths)
+            work_state['current'] = p.name
+        if pause and pause.get('flag'):
+            out.append({'name': p.name, 'status': 'paused', 'src_hash': 'f' * 64})
+            continue
+        if cancel and cancel.get('flag'):
+            out.append({'name': p.name, 'status': 'cancelled', 'src_hash': 'f' * 64})
+            continue
+        time.sleep(0.25)  # wide enough window for pause/cancel tests to land
         img = np.zeros((8, 8, 3), dtype='uint8')
         img[2:6, 2:6] = (0, 128, 255)
         meta = {
@@ -44,7 +56,6 @@ def _fake_run_pipeline(paths, preset, colorize, upscale_bg, sink,
             'w': 0.5, 'w_final': 0.5, 'face_count_in': 0, 'face_count_out': 0,
             'sharpness_in': 1.0, 'sharpness_out': 1.0, 'errors': [], 'flags': [],
         }
-        import cv2
         ok, buf = cv2.imencode('.png', img)
         sink(p.name, p.stem, '.png', 'f' * 64, meta, buf.tobytes())
         out.append({'name': p.name, 'status': 'done', 'src_hash': 'f' * 64,
@@ -168,3 +179,119 @@ def test_reveal_rejects_bad_target_and_missing_folder(client, tmp_path):
 def test_cancel_of_unknown_job_is_404(client):
     r = client.post('/cancel', json={'job_id': 'nope'})
     assert r.status_code == 404
+
+
+def _make_folder(client, tmp_path, n):
+    folder = tmp_path / f'scans-{n}-{time.time_ns()}'
+    folder.mkdir(parents=True)
+    for i in range(n):
+        (folder / f'p{i}.jpg').write_bytes(b'x' * 10)
+    return folder
+
+
+def _wait_status(client, job_id, wanted, timeout=20):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        job = client.get('/status').json()['job']
+        if job and job['id'] == job_id and job['status'] in wanted:
+            return job
+        jobs = client.get('/jobs').json()['jobs']
+        match = next((j for j in jobs if j['id'] == job_id), None)
+        if match and match['status'] in wanted:
+            return match
+        time.sleep(0.05)
+    states = [(j['id'], j['status']) for j in
+              client.get('/jobs').json()['jobs'][:6]]
+    raise AssertionError(f'job {job_id} never reached {wanted}; '
+                         f'job states now: {states}')
+
+
+def test_pause_then_resume_finishes_remaining(client, tmp_path):
+    folder = _make_folder(client, tmp_path, 6)
+    job_id = client.post('/jobs', json={'folder': str(folder), 'preset': 'low'}).json()['job_id']
+    # wait until at least two photos are through, then pause
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        job = client.get('/status').json()['job']
+        if job and job['id'] == job_id and (job.get('stage_done') or 0) >= 2:
+            break
+        time.sleep(0.05)
+    r = client.post('/pause', json={'job_id': job_id})
+    assert r.status_code == 200
+    job = _wait_status(client, job_id, ('paused',))
+    assert 1 <= len(job['remaining']) < 6, 'pause should leave unfinished photos'
+
+    r = client.post('/resume', json={'job_id': job_id})
+    assert r.status_code == 200
+    job = _wait_status(client, job_id, ('done',), timeout=30)
+    assert job['summary']['restored'] == 6, 'resume must finish the rest'
+    assert job['remaining'] == []
+    pairs = client.get('/pairs', params={'job_id': job_id}).json()['pairs']
+    assert len(pairs) == 6
+
+
+def test_second_job_queues_and_runs_in_order(client, tmp_path):
+    f1 = _make_folder(client, tmp_path, 3)
+    f2 = _make_folder(client, tmp_path, 2)
+    first = client.post('/jobs', json={'folder': str(f1), 'preset': 'low'}).json()['job_id']
+    second = client.post('/jobs', json={'folder': str(f2), 'preset': 'low'}).json()
+    assert second['status'] == 'queued', 'second job must queue, not 409'
+    _wait_status(client, first, ('done',), timeout=30)
+    job2 = _wait_status(client, second['job_id'], ('done',), timeout=30)
+    assert job2['summary']['restored'] == 2
+
+
+def test_cancel_queued_or_running_job(client, tmp_path):
+    folder = _make_folder(client, tmp_path, 6)
+    job_id = client.post('/jobs', json={'folder': str(folder), 'preset': 'low'}).json()['job_id']
+    cancel_resp = client.post('/cancel', json={'job_id': job_id})
+    assert cancel_resp.status_code == 200, (
+        f'cancel itself failed: {cancel_resp.status_code} {cancel_resp.text}')
+    try:
+        job = _wait_status(client, job_id, ('cancelled',), timeout=30)
+    except AssertionError as err:
+        entry = app_main.JOBS.get(job_id)
+        raise AssertionError(
+            f'{err}; JOBS entry: status={entry and entry["status"]} '
+            f'cancel_flag={entry and entry["cancel"].get("flag")}')
+    assert job['summary']['restored'] < 6, 'cancelled job should not process everything'
+
+
+def test_delete_job_removes_files(client, tmp_path):
+    folder = _make_folder(client, tmp_path, 2)
+    job_id = client.post('/jobs', json={'folder': str(folder), 'preset': 'low'}).json()['job_id']
+    _wait_status(client, job_id, ('done',), timeout=30)
+    job_dir = Path(app_main.RESULTS_DIR) / job_id
+    assert job_dir.is_dir()
+    r = client.post('/delete', json={'job_id': job_id})
+    assert r.status_code == 200
+    assert not job_dir.exists()
+    assert client.get('/pairs', params={'job_id': job_id}).status_code == 404
+    r = client.post('/delete', json={'job_id': job_id})
+    assert r.status_code == 404
+
+
+def test_delete_running_job_is_409(client, tmp_path):
+    folder = _make_folder(client, tmp_path, 6)
+    job_id = client.post('/jobs', json={'folder': str(folder), 'preset': 'low'}).json()['job_id']
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        job = client.get('/status').json()['job']
+        if job and job['id'] == job_id and job['status'] == 'running':
+            break
+        time.sleep(0.05)
+    r = client.post('/delete', json={'job_id': job_id})
+    assert r.status_code == 409
+    client.post('/cancel', json={'job_id': job_id})
+    _wait_status(client, job_id, ('cancelled',), timeout=30)
+
+
+def test_contactsheet_builds_pdf(client, tmp_path):
+    folder = _make_folder(client, tmp_path, 3)
+    job_id = client.post('/jobs', json={'folder': str(folder), 'preset': 'low'}).json()['job_id']
+    _wait_status(client, job_id, ('done',), timeout=30)
+    r = client.post('/contactsheet', json={'job_id': job_id})
+    assert r.status_code == 200
+    assert r.json()['pages'] == 1 and r.json()['photos'] == 3
+    pdf = Path(app_main.RESULTS_DIR) / job_id / 'contact-sheet.pdf'
+    assert pdf.read_bytes()[:5] == b'%PDF-'

@@ -45,8 +45,14 @@ http://127.0.0.1:8545 in your browser.
 4. Review the gallery — drag left/right on any photo to compare.
 5. Photos with a red flag are queued at the bottom; re-run them at higher
    fidelity if you like, or ignore the flag.
-6. **Export** copies the restored set to the job's `export` folder, and
-   **Push to Immich** uploads it to your own Immich server.
+6. **Export** copies the restored set (with sidecar JSONs) and its
+   **contact-sheet PDF** to the job's export area, and **Push to Immich**
+   uploads the restored set to your own Immich server.
+
+Jobs can **Pause** (stops after the current photo; **Resume** finishes the
+rest into the same job) and several folders can be **queued** — they run
+one at a time in submission order, so you can line up an evening of
+shoeboxes before bed. Old jobs can be deleted from the history dropdown.
 
 Each photo is written to disk the moment it finishes, so closing the app
 mid-job keeps the work — the job shows up as *interrupted* on the next

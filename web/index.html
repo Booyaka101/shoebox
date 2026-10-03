@@ -103,13 +103,15 @@
     <div class="row hidden" id="historyrow" style="margin-top:8px">
       <label for="history" style="margin:0">Previous jobs</label>
       <select id="history" style="flex:1; padding:6px; background:#12141a; color:var(--text); border:1px solid var(--line); border-radius:6px"></select>
+      <button id="deletejob" title="Delete this job and its files">Delete</button>
     </div>
   </section>
 
   <section id="run" class="hidden">
     <h2>2 · Running</h2>
     <div id="stage" class="row"><span id="stagename">starting</span>
-      <span class="badge" id="stagecount"></span><span class="badge" id="elapsed"></span></div>
+      <span class="badge" id="stagecount"></span><span class="badge" id="elapsed"></span>
+      <span class="badge" id="currentfile"></span></div>
     <div class="bar"><div id="bar"></div></div>
     <div class="bar hidden" id="dlbar_wrap"><div id="dlbar" style="background:#5c8ce0"></div></div>
     <div class="msg" id="dlmsg"></div>
@@ -119,6 +121,8 @@
       <span class="stat"><b id="s_skipped">0</b> skipped</span>
       <span class="stat hidden" id="s_cancelled_wrap"><b id="s_cancelled">0</b> not processed</span>
       <span class="grow"></span>
+      <button id="pause" class="hidden">Pause</button>
+      <button id="resume" class="hidden">Resume</button>
       <button id="cancel">Stop after current photo</button>
     </div>
   </section>
@@ -139,6 +143,7 @@
     <div class="row">
       <button class="primary" id="export">Export restored set</button>
       <button id="openexport">Show in Explorer</button>
+      <button id="sheet">Contact sheet PDF</button>
       <span class="msg" id="exportmsg" style="margin:0"></span>
     </div>
     <div class="row" style="margin-top:14px">
@@ -247,11 +252,13 @@ async function poll() {
   }
 
   const active = ['queued','running'].includes(job.status);
-  show($('run'), active || job.total > 0);
-  $('stagename').textContent = job.stage;
+  const isPaused = job.status === 'paused';
+  show($('run'), active || isPaused || job.total > 0);
+  $('stagename').textContent = job.status === 'paused' ? 'paused' : job.stage;
   $('stagecount').textContent = `${job.stage_done||0}/${job.stage_total||job.total||0}`;
   const frac = job.stage_total ? (job.stage_done / job.stage_total) : 0;
   $('bar').style.width = Math.round(100 * frac) + '%';
+  $('currentfile').textContent = active ? (job.current || '') : '';
   const sum = job.summary || {restored: job.done||0, flagged: 0,
                               skipped: (job.skipped||[]).length, cancelled: 0};
   $('s_restored').textContent = sum.restored;
@@ -265,8 +272,12 @@ async function poll() {
   }
   $('elapsed').textContent = fmtDuration(elapsed) + eta;
   $('cancel').disabled = !active;
+  $('pause').disabled = !active;
+  show($('pause'), active);
+  show($('resume'), isPaused);
 
-  if (!active && running) { running = false; clearInterval(pollTimer); renderDone(job); }
+  if (!active && running && !isPaused) { running = false; clearInterval(pollTimer); renderDone(job); }
+  if (isPaused && running) { running = false; clearInterval(pollTimer); renderDone(job); }
 }
 
 async function renderDone(job) {
@@ -279,8 +290,10 @@ async function renderDone(job) {
   let flagged = 0;
   for (const pair of p.pairs) {
     const meta = pair.meta || {};
-    const outDims = (meta.w_out && meta.w_out !== meta.w_in) ? ` · out ${meta.w_out}×${meta.h_out}` : '';
-    const m = `w=${meta.w_final ?? meta.w} · faces ${meta.face_count_in}→${meta.face_count_out} · sharp ${meta.sharpness_in}→${meta.sharpness_out}${outDims}`;
+    const v = (x) => x === undefined || x === null ? '—' : x;
+    const outDims = (meta.w_out && meta.w_out !== meta.w_in)
+      ? ` · out ${v(meta.w_out)}×${v(meta.h_out)}` : '';
+    const m = `w=${v(meta.w_final ?? meta.w)} · faces ${v(meta.face_count_in)}→${v(meta.face_count_out)} · sharp ${v(meta.sharpness_in)}→${v(meta.sharpness_out)}${outDims}`;
     gal.appendChild(card(pair, false, m));
     if (pair.flags && pair.flags.length) { flagged++; q.appendChild(card(pair, true, m)); }
   }
@@ -318,7 +331,7 @@ function card(pair, queued, metaLine) {
       <div>${flags}</div>
       <div class="kv">${metaLine || ''}</div>
       ${queued ? '<button class="rerun" style="margin-top:6px">Re-run at higher fidelity</button>' : ''}
-    </div>`;
+    </div>`;;
   const wrap = div.querySelector('.imgwrap');
   const slider = div.querySelector('input[type=range]');
   const apply = () => { wrap.style.setProperty('--split', slider.value + '%'); };
@@ -346,6 +359,43 @@ $('export').onclick = async () => {
 $('openexport').onclick = async () => {
   try { await api('/reveal', {job_id: jobId, target: 'export'}); }
   catch (e) { $('exportmsg').textContent = e.message; }
+};
+
+$('sheet').onclick = async () => {
+  $('exportmsg').textContent = 'building contact sheet…';
+  try {
+    const r = await api('/contactsheet', {job_id: jobId});
+    $('exportmsg').textContent = `${r.photos} photos on ${r.pages} page(s): ${r.to}`;
+  } catch (e) { $('exportmsg').textContent = e.message; }
+};
+
+$('pause').onclick = async () => {
+  try {
+    await api('/pause', {job_id: jobId});
+    $('stagename').textContent = 'pausing — finishing the current photo…';
+  } catch (e) { $('startmsg').textContent = e.message; }
+};
+
+$('resume').onclick = async () => {
+  try {
+    const r = await api('/resume', {job_id: jobId});
+    running = true;
+    show($('review'), false); show($('queuewrap'), false);
+    startPolling();
+  } catch (e) { $('startmsg').textContent = e.message; }
+};
+
+$('deletejob').onclick = async () => {
+  const sel = $('history');
+  const id = sel.value;
+  if (!id || !confirm(`Delete job ${id} and all its files?`)) return;
+  try {
+    await api('/delete', {job_id: id});
+    await loadHistory();
+    if (jobId === id) { jobId = sel.value || null; }
+    if (jobId) renderDone({id: jobId});
+    else { $('gallery').innerHTML = ''; show($('review'), false); show($('out'), false); }
+  } catch (e) { $('startmsg').textContent = e.message; }
 };
 
 async function loadHistory() {

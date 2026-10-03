@@ -142,22 +142,33 @@ def encode_image(img_bgr, ext: str, exif_bytes: bytes = None) -> bytes:
     return buf.tobytes()
 
 
-def run_pipeline(paths, preset, colorize, upscale_bg, sink, work_state=None, cancel=None):
+def run_pipeline(paths, preset, colorize, upscale_bg, sink, work_state=None,
+                 cancel=None, pause=None):
     """Restore the given paths stage by stage. Returns one public info dict
-    per path: {name, status: done|skipped|cancelled, meta?, reason?}.
+    per path: {name, status: done|skipped|cancelled|paused, meta?, reason?}.
 
-    sink(name, stem, ext, src_hash, meta, data) is called for every finished
-    photo, as soon as it is finished. paths must already exist.
+    sink(name, stem, ext, src_hash, meta, data, exif) is called for every
+    finished photo, as soon as it is finished. paths must already exist.
+    A tripped pause flag leaves unprocessed photos as 'paused' so the caller
+    can record them and resume later; cancel marks them 'cancelled'.
     """
 
     def cancelled():
         return bool(cancel and cancel.get('flag'))
 
-    def report(stage, done, total):
+    def paused():
+        return bool(pause and pause.get('flag'))
+
+    def stopped():
+        return paused() or cancelled()
+
+    def report(stage, done, total, current=None):
         if work_state is not None:
             work_state['stage'] = stage
             work_state['stage_done'] = done
             work_state['stage_total'] = total
+            if current is not None:
+                work_state['current'] = current
 
     presets = dict(PRESETS[preset])
     w = presets['w']
@@ -208,18 +219,15 @@ def run_pipeline(paths, preset, colorize, upscale_bg, sink, work_state=None, can
         colorizer = models.get_colorizer()
         try:
             for i, info in enumerate(to_color):
-                if cancelled():
+                if stopped():
                     break
-                report('colorizing', i, len(to_color))
+                report('colorizing', i, len(to_color), info['name'])
                 rgb = cv2.cvtColor(info['_img'], cv2.COLOR_BGR2RGB)
                 colored = colorizer.colorize(rgb, render_factor=render_factor)
                 info['_img'] = cv2.cvtColor(colored, cv2.COLOR_RGB2BGR)
         finally:
             models.unload('colorizer')
-    if cancelled():
-        for info in infos:
-            if info['status'] == 'pending':
-                info['status'] = 'cancelled'
+    _sweep_stopped(infos, paused, cancelled)
     report('colorizing', len(to_color), len(to_color))
 
     # stage 2: face restoration (+ optional RealESRGAN background inside the
@@ -232,10 +240,13 @@ def run_pipeline(paths, preset, colorize, upscale_bg, sink, work_state=None, can
         device = models.get_device()
         try:
             for i, info in enumerate(to_face):
+                if paused():
+                    info['status'] = 'paused'
+                    continue
                 if cancelled():
                     info['status'] = 'cancelled'
                     continue
-                report('restoring faces', i, len(to_face))
+                report('restoring faces', i, len(to_face), info['name'])
                 try:
                     _restore_one(info, helper, net, bg, device, w, upscale_bg)
                     _finish_one(info, preset, w, render_factor, colorize, upscale_bg)
@@ -252,11 +263,21 @@ def run_pipeline(paths, preset, colorize, upscale_bg, sink, work_state=None, can
         finally:
             models.unload('face', 'bg')
     report('restoring faces', len(to_face), len(to_face))
-    if cancelled():
+    _sweep_stopped(infos, paused, cancelled)
+    return _public(infos)
+
+
+def _sweep_stopped(infos, paused, cancelled):
+    """Mark everything still pending according to whichever stop flag tripped
+    (pause wins, so a pause during a cancel-request can be resumed)."""
+    if paused():
+        for info in infos:
+            if info['status'] == 'pending':
+                info['status'] = 'paused'
+    elif cancelled():
         for info in infos:
             if info['status'] == 'pending':
                 info['status'] = 'cancelled'
-    return _public(infos)
 
 
 def _restore_one(info, helper, net, bg, device, w, upscale_bg):

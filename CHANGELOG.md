@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.0.3 — 2026-10-03
+
+Third loop: the batch-workflow release.
+
+- **Pause and resume.** Pause stops after the current photo and remembers
+  what is left; Resume processes the remainder into the same job. Verified
+  live: paused during colorization (5 remaining), resumed to done.
+- **Queue multiple folders.** Submitting a job while another runs queues it
+  (up to 8) instead of refusing; the worker runs them in order.
+- **Delete old jobs** from the Previous-jobs dropdown (refuses while a job
+  is queued/running).
+- **Contact-sheet PDF** of the restored set (12 labelled thumbnails per
+  page) next to the export button.
+- The photo currently being processed shows in the progress bar; gallery
+  metadata lines no longer render `undefined` for missing sidecars.
+- Fixed a race found by the new endpoint tests: cancelling a job that the
+  worker had just dequeued could be overwritten by the job's own start-up,
+  so the job ran to completion. Cancelling a queued job now also raises the
+  pipeline's cancel flag; the worker re-checks under the lock.
+- Tests: 32 (pause/resume, queue ordering, queued-cancel race, delete,
+  contact sheet).
+
 ## 1.0.2 — 2026-10-03
 
 Second review loop: archive fidelity and launcher polish.
