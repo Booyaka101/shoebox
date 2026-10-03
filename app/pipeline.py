@@ -11,18 +11,19 @@ Flow for one photo (originals are only ever opened for reading):
      restoration tool must not do
   5. optional RealESRGAN x2 background (tiled), feeding the paste-back like
      inference_codeformer.py does with --bg_upsampler realesrgan
-  6. write restored JPEG/PNG + sidecar JSON metadata
+  6. quality metrics and flags, then `sink(name, stem, ext, src_hash, meta,
+     data)` hands the caller the encoded output bytes — main.py writes them
+     to disk immediately, so a crash mid-job keeps every finished photo
 
-Heavy models are loaded per stage and unloaded between stages; with
-upscale_bg enabled the RealESRGAN tile runs inside the face stage because the
-restored faces are pasted onto the upscaled background (the reference flow).
+Memory: only one photo's pixels are alive at a time. Inputs and intermediates
+are dropped as soon as a photo's output is handed to the sink, so folder size
+does not scale RAM. Cancellation is checked between photos and records the
+unprocessed ones as status 'cancelled' rather than failing them.
 """
 
 import hashlib
-import json
 import logging
 import threading
-import time
 from pathlib import Path
 
 import cv2
@@ -55,7 +56,7 @@ def required_metadata_keys():
 def find_images(folder: Path):
     """Sorted image files, ignoring macOS metadata junk and prior outputs."""
     files = []
-    for p in sorted(folder.iterdir()):
+    for p in sorted(Path(folder).iterdir()):
         if not p.is_file() or p.name.startswith('._'):
             continue
         if p.suffix.lower() in IMAGE_EXTS and not p.stem.endswith('_restored'):
@@ -63,7 +64,7 @@ def find_images(folder: Path):
     return files
 
 
-def read_image_bgr(path: Path):
+def read_image_bgr(path):
     """cv2.imread fails on non-ASCII Windows paths; go through the bytes."""
     data = np.fromfile(str(path), dtype=np.uint8)
     if data.size == 0:
@@ -74,7 +75,7 @@ def read_image_bgr(path: Path):
     return img
 
 
-def sha256_of(path: Path):
+def sha256_of(path):
     h = hashlib.sha256()
     with open(path, 'rb') as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b''):
@@ -82,8 +83,9 @@ def sha256_of(path: Path):
     return h.hexdigest()
 
 
-def output_name(job_dir: Path, stem: str, ext: str, src_hash: str):
+def output_name(job_dir, stem: str, ext: str, src_hash: str):
     """<stem>_restored<ext>; content-hash suffix on collisions."""
+    job_dir = Path(job_dir)
     base = job_dir / 'restored' / f'{stem}_restored{ext}'
     if base.exists():
         base = job_dir / 'restored' / f'{stem}_restored_{src_hash[:8]}{ext}'
@@ -98,12 +100,12 @@ def encode_image(img_bgr, ext: str) -> bytes:
     return buf.tobytes()
 
 
-def run_pipeline(paths, preset, colorize, upscale_bg, work_state=None, cancel=None):
-    """Restore the given Paths stage by stage. Returns one result dict per path.
+def run_pipeline(paths, preset, colorize, upscale_bg, sink, work_state=None, cancel=None):
+    """Restore the given paths stage by stage. Returns one public info dict
+    per path: {name, status: done|skipped|cancelled, meta?, reason?}.
 
-    paths must already be validated to exist. work_state is the shared job
-    dict (progress keys are updated in place); cancel is a dict with a bool
-    'flag' checked between images.
+    sink(name, stem, ext, src_hash, meta, data) is called for every finished
+    photo, as soon as it is finished. paths must already exist.
     """
 
     def cancelled():
@@ -124,30 +126,34 @@ def run_pipeline(paths, preset, colorize, upscale_bg, work_state=None, cancel=No
     for i, path in enumerate(paths):
         report('reading', i, len(paths))
         info = {
-            'path': path,
             'name': path.name,
             'stem': path.stem,
             'ext': '.jpg' if path.suffix.lower() in ('.jpg', '.jpeg') else '.png',
             'src_hash': sha256_of(path),
             'errors': [],
+            'status': 'pending',
         }
         try:
-            info['img_in'] = read_image_bgr(path)
+            img_in = read_image_bgr(path)
         except Exception as err:
-            info['skip'] = f'unreadable: {err}'
+            info['status'] = 'skipped'
+            info['reason'] = f'unreadable: {err}'
             infos.append(info)
             continue
-        h, w_in = info['img_in'].shape[:2]
-        info['w_in'], info['h_in'] = int(w_in), int(h)
+        h, w_px = img_in.shape[:2]
+        info['w_in'], info['h_in'] = int(w_px), int(h)
         info['was_gray'] = qa.chroma_variance(
-            cv2.cvtColor(info['img_in'], cv2.COLOR_BGR2RGB)) <= 10.0
+            cv2.cvtColor(img_in, cv2.COLOR_BGR2RGB)) <= 10.0
         info['colorize_needed'] = bool(colorize and info['was_gray'])
-        info['sharpness_in'] = qa.sharpness(info['img_in'])
+        info['sharpness_in'] = qa.sharpness(img_in)
+        info['chroma_in'] = qa.chroma_variance(
+            cv2.cvtColor(img_in, cv2.COLOR_BGR2RGB))
+        info['_img'] = img_in
         infos.append(info)
     report('reading', len(paths), len(paths))
 
     # stage 1: colorization (DeOldify artistic)
-    to_color = [n for n in infos if 'img_in' in n and n['colorize_needed']]
+    to_color = [n for n in infos if n['status'] == 'pending' and n['colorize_needed']]
     if to_color:
         colorizer = models.get_colorizer()
         try:
@@ -155,17 +161,21 @@ def run_pipeline(paths, preset, colorize, upscale_bg, work_state=None, cancel=No
                 if cancelled():
                     break
                 report('colorizing', i, len(to_color))
-                rgb = cv2.cvtColor(info['img_in'], cv2.COLOR_BGR2RGB)
+                rgb = cv2.cvtColor(info['_img'], cv2.COLOR_BGR2RGB)
                 colored = colorizer.colorize(rgb, render_factor=render_factor)
-                info['img_current'] = cv2.cvtColor(colored, cv2.COLOR_RGB2BGR)
+                info['_img'] = cv2.cvtColor(colored, cv2.COLOR_RGB2BGR)
         finally:
             models.unload('colorizer')
-    for info in infos:
-        info.setdefault('img_current', info.get('img_in'))
+    if cancelled():
+        for info in infos:
+            if info['status'] == 'pending':
+                info['status'] = 'cancelled'
+    report('colorizing', len(to_color), len(to_color))
 
     # stage 2: face restoration (+ optional RealESRGAN background inside the
-    # paste-back, as CodeFormer's own script does)
-    to_face = [n for n in infos if 'img_current' in n and not n.get('skip')]
+    # paste-back, as CodeFormer's own script does), QA face count via the
+    # helper's own detector, metrics, write through the sink
+    to_face = [n for n in infos if n['status'] == 'pending']
     if to_face:
         helper, net = models.get_codeformer()
         bg = models.get_bg_upsampler() if upscale_bg else None
@@ -173,75 +183,33 @@ def run_pipeline(paths, preset, colorize, upscale_bg, work_state=None, cancel=No
         try:
             for i, info in enumerate(to_face):
                 if cancelled():
-                    break
+                    info['status'] = 'cancelled'
+                    continue
                 report('restoring faces', i, len(to_face))
-                _face_stage(info, helper, net, bg, device, w, upscale_bg)
+                try:
+                    _restore_one(info, helper, net, bg, device, w, upscale_bg)
+                    _finish_one(info, preset, w, render_factor, colorize, upscale_bg)
+                    data = encode_image(info.pop('_final'), info['ext'])
+                    sink(info['name'], info['stem'], info['ext'],
+                         info['src_hash'], info['meta'], data)
+                    info['status'] = 'done'
+                except Exception as err:
+                    log.exception('processing failed for %s', info['name'])
+                    info['status'] = 'skipped'
+                    info['reason'] = f'processing failed: {err}'
+                finally:
+                    info.pop('_img', None)
         finally:
             models.unload('face', 'bg')
     report('restoring faces', len(to_face), len(to_face))
-
-    # stage 3: QA — count faces in the final output with the detector alone
-    to_qa = [n for n in infos if n.get('img_final') is not None]
-    if to_qa:
-        detector = models.get_face_detector()
-        try:
-            for i, info in enumerate(to_qa):
-                report('quality check', i, len(to_qa))
-                info['face_count_out'] = _count_faces(info['img_final'], detector)
-        finally:
-            models.unload('detector')
-    for info in infos:
-        info.setdefault('face_count_out', 0)
-
-    # stage 4: metrics, flags, write outputs
-    for i, info in enumerate(infos):
-        report('writing', i, len(infos))
-        if info.get('skip'):
-            continue
-        out_same_size = info['img_final']
-        if out_same_size.shape[:2] != info['img_in'].shape[:2]:
-            resized = cv2.resize(out_same_size, (info['w_in'], info['h_in']),
-                                 interpolation=cv2.INTER_AREA)
-        else:
-            resized = out_same_size
-        info['sharpness_out'] = qa.sharpness(resized)
-        still_gray = qa.chroma_variance(
-            cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)) <= 10.0
-        info['flags'] = qa.evaluate(
-            face_errors=info['errors'],
-            face_count_in=info['face_count_in'],
-            face_count_out=info['face_count_out'],
-            sharpness_in=info['sharpness_in'],
-            sharpness_out=info['sharpness_out'],
-            was_gray=info['was_gray'],
-            colorize_requested=bool(colorize),
-            restored_still_gray=still_gray)
-        info['meta'] = {
-            'source_hash': info['src_hash'],
-            'models': {
-                'colorize': 'DeOldify ColorizeArtistic_gen.pth' if info['colorize_needed'] else None,
-                'face_restore': 'CodeFormer codeformer.pth (retinaface_resnet50 detection)',
-                'bg_upscale': 'RealESRGAN_x2plus.pth x2' if upscale_bg else None,
-            },
-            'preset': preset,
-            'w': w,
-            'w_final': info.get('w_final', w),
-            'render_factor': render_factor,
-            'w_in': info['w_in'],
-            'h_in': info['h_in'],
-            'w_out': int(info['img_final'].shape[1]),
-            'h_out': int(info['img_final'].shape[0]),
-            'face_count_in': info['face_count_in'],
-            'face_count_out': info['face_count_out'],
-            'sharpness_in': round(info['sharpness_in'], 2),
-            'sharpness_out': round(info['sharpness_out'], 2),
-            'errors': info['errors'],
-            'flags': info['flags'],
-        }
-    return infos
+    if cancelled():
+        for info in infos:
+            if info['status'] == 'pending':
+                info['status'] = 'cancelled'
+    return _public(infos)
 
 
-def _face_stage(info, helper, net, bg, device, w, upscale_bg):
+def _restore_one(info, helper, net, bg, device, w, upscale_bg):
     """Face restoration for one image, mirroring inference_codeformer.py's
     per-image body — except inference failures flag instead of passing the
     original face through silently."""
@@ -252,10 +220,11 @@ def _face_stage(info, helper, net, bg, device, w, upscale_bg):
 
     info['face_count_in'] = 0
     info['errors'] = []
+    info['_det'] = helper.face_detector
     helper.clean_all()
     helper.set_upscale_factor(2 if upscale_bg else 1)
     try:
-        helper.read_image(info['img_current'])
+        helper.read_image(info['_img'])
         num_det = helper.get_face_landmarks_5(
             only_center_face=False, resize=640, eye_dist_threshold=5)
         info['face_count_in'] = int(max(num_det, 0))
@@ -286,31 +255,77 @@ def _face_stage(info, helper, net, bg, device, w, upscale_bg):
 
     if not helper.cropped_faces:
         # nothing detectable/fixable: carry the current image through
-        info['img_final'] = info['img_current']
+        info['_final'] = info['_img']
         return
 
     try:
-        bg_img = bg.enhance(info['img_current'], outscale=2)[0] if bg is not None else None
+        bg_img = bg.enhance(info['_img'], outscale=2)[0] if bg is not None else None
         helper.get_inverse_affine(None)
         paste_kwargs = {}
         if bg is not None:
             paste_kwargs = {'upsample_img': bg_img, 'face_upsampler': bg}
-        info['img_final'] = helper.paste_faces_to_input_image(**paste_kwargs)
+        info['_final'] = helper.paste_faces_to_input_image(**paste_kwargs)
     except Exception as err:
         log.warning('paste-back failed for %s: %s', info['name'], err)
         info['errors'].append(f'paste-back failed: {err}')
-        info['img_final'] = info['img_current']
+        info['_final'] = info['_img']
+
+
+def _finish_one(info, preset, w, render_factor, colorize, upscale_bg):
+    """QA face count (the helper's own detector), metrics, flags, metadata."""
+    final = info['_final']
+    if final.shape[:2] != (info['h_in'], info['w_in']):
+        resized = cv2.resize(final, (info['w_in'], info['h_in']),
+                             interpolation=cv2.INTER_AREA)
+    else:
+        resized = final
+    info['sharpness_out'] = qa.sharpness(resized)
+    info['face_count_out'] = _count_faces(final, info['_det'])
+    info['chroma_out'] = qa.chroma_variance(
+        cv2.cvtColor(resized, cv2.COLOR_BGR2RGB))
+    info['flags'] = qa.evaluate(
+        face_errors=info['errors'],
+        face_count_in=info['face_count_in'],
+        face_count_out=info['face_count_out'],
+        sharpness_in=info['sharpness_in'],
+        sharpness_out=info['sharpness_out'],
+        was_gray=info['was_gray'],
+        colorize_requested=bool(colorize),
+        restored_still_gray=info['chroma_out'] <= 10.0)
+    info['meta'] = {
+        'source_hash': info['src_hash'],
+        'models': {
+            'colorize': 'DeOldify ColorizeArtistic_gen.pth' if info['colorize_needed'] else None,
+            'face_restore': 'CodeFormer codeformer.pth (retinaface_resnet50 detection)',
+            'bg_upscale': 'RealESRGAN_x2plus.pth x2' if upscale_bg else None,
+        },
+        'preset': preset,
+        'w': w,
+        'w_final': info.get('w_final', w),
+        'render_factor': render_factor,
+        'w_in': info['w_in'],
+        'h_in': info['h_in'],
+        'w_out': int(final.shape[1]),
+        'h_out': int(final.shape[0]),
+        'face_count_in': info['face_count_in'],
+        'face_count_out': info['face_count_out'],
+        'sharpness_in': round(info['sharpness_in'], 2),
+        'sharpness_out': round(info['sharpness_out'], 2),
+        'chroma_in': round(info['chroma_in'], 2),
+        'chroma_out': round(info['chroma_out'], 2),
+        'errors': info['errors'],
+        'flags': info['flags'],
+    }
 
 
 def _count_faces(img_bgr, detector):
     """Count detectable faces on a restored image (QA mirror of the
     detector's own preprocessing in FaceRestoreHelper)."""
-    import numpy as np
+    import torch
     h, w = img_bgr.shape[:2]
     scale = 640 / min(h, w)
     interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
     img = cv2.resize(img_bgr, (int(w * scale), int(h * scale)), interpolation=interp)
-    import torch
     with torch.no_grad():
         bboxes = detector.detect_faces(img)
     if bboxes is None or bboxes.shape[0] == 0:
@@ -321,6 +336,19 @@ def _count_faces(img_bgr, detector):
         if eye_dist >= 5:
             count += 1
     return count
+
+
+def _public(infos):
+    out = []
+    for info in infos:
+        pub = {'name': info['name'], 'status': info['status'],
+               'src_hash': info['src_hash']}
+        if info['status'] == 'skipped':
+            pub['reason'] = info.get('reason', 'unknown')
+        if info['status'] == 'done':
+            pub['meta'] = info['meta']
+        out.append(pub)
+    return out
 
 
 def next_preset(preset):

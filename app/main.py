@@ -64,8 +64,13 @@ def _job_dir(job_id: str) -> Path:
     return RESULTS_DIR / job_id
 
 
-def _save_job(job):
-    job_dir = _job_dir(job['id'])
+def _save_job(job, job_dir=None):
+    """job_dir may be pinned by the caller: the job thread outlives the HTTP
+    request that created it, so it must not re-resolve a directory global
+    that could have changed between request and write."""
+    if job_dir is None:
+        job_dir = _job_dir(job['id'])
+    job_dir = Path(job_dir)
     job_dir.mkdir(parents=True, exist_ok=True)
     snapshot = {k: v for k, v in job.items() if k != 'cancel'}
     (job_dir / 'job.json').write_text(
@@ -81,13 +86,20 @@ def _load_last_job():
         meta = d / 'job.json'
         if meta.is_file():
             try:
-                candidates.append((meta.stat().st_mtime, json.loads(meta.read_text(encoding='utf-8'))))
+                candidates.append((meta.stat().st_mtime,
+                                   json.loads(meta.read_text(encoding='utf-8'))))
             except (OSError, ValueError):
                 continue
     if candidates:
         candidates.sort()
         job = candidates[-1][1]
         job.setdefault('cancel', {'flag': False})
+        if job.get('status') in ('queued', 'running'):
+            # the process died mid-job; nothing is running now
+            job['status'] = 'interrupted'
+            job.setdefault('warnings', []).append(
+                'the app was closed while this job was running; photos already '
+                'written to restored/ are kept')
         JOBS[job['id']] = job
         _active_job_id = job['id']
 
@@ -111,7 +123,31 @@ def _latest_job() -> dict:
 
 # ---------------------------------------------------------------- job runner
 
-def _run_job_thread(job):
+def _make_sink(job, job_dir):
+    """Returns the pipeline sink: writes each finished photo to disk the
+    moment it is done, so a crash mid-job keeps the work."""
+    restored_dir = Path(job_dir) / 'restored'
+    restored_dir.mkdir(parents=True, exist_ok=True)
+
+    def sink(name, stem, ext, src_hash, meta, data):
+        out_path = pipeline.output_name(job_dir, stem, ext, src_hash)
+        out_path.write_bytes(data)
+        sidecar = out_path.parent / (out_path.stem + '.json')
+        sidecar.write_text(json.dumps(meta, indent=1), encoding='utf-8')
+        job['results'].append({'name': name, 'output': out_path.name,
+                               'flags': meta.get('flags', [])})
+        job['done'] += 1
+        flagged = sum(1 for r in job['results'] if r['flags'])
+        job['summary'] = {'restored': len(job['results']), 'flagged': flagged,
+                          'skipped': len(job['skipped']),
+                          'cancelled': len(job['cancelled'])}
+        if job['done'] % 5 == 0:
+            _save_job(job, job_dir)
+
+    return sink
+
+
+def _run_job_thread(job, job_dir):
     global _active_job_id
     try:
         folder = Path(job['folder'])
@@ -122,46 +158,28 @@ def _run_job_thread(job):
             return
         job['total'] = len(paths)
         job['status'] = 'running'
-        restored_dir = _job_dir(job['id']) / 'restored'
-        restored_dir.mkdir(parents=True, exist_ok=True)
-        taken = set()
-        for p in paths:
-            taken.add(p.name)
+        job['skipped'] = []
+        job['cancelled'] = []
+        job['results'] = []
 
         def progress(stage, done, total):
             job['stage'], job['stage_done'], job['stage_total'] = stage, done, total
-            _save_job(job)
+            _save_job(job, job_dir)
 
         infos = pipeline.run_pipeline(
             paths, job['preset'], job['colorize'], job['upscale_bg'],
-            work_state=job, cancel=job['cancel'])
+            sink=_make_sink(job, job_dir), work_state=job, cancel=job['cancel'])
 
-        results, skipped = [], []
-        if job['cancel']['flag']:
-            job['status'] = 'cancelled'
-        else:
-            job['status'] = 'done'
+        job['status'] = 'cancelled' if job['cancel']['flag'] else 'done'
         for info in infos:
-            if info.get('skip'):
-                skipped.append({'name': info['name'], 'reason': info['skip']})
-                continue
-            if info.get('img_final') is None:
-                skipped.append({'name': info['name'], 'reason': 'processing failed'})
-                continue
-            out_path = pipeline.output_name(_job_dir(job['id']), info['stem'],
-                                            info['ext'], info['src_hash'])
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_bytes(pipeline.encode_image(info['img_final'], info['ext']))
-            sidecar = out_path.with_suffix('.json').with_name(out_path.stem + '.json')
-            sidecar.write_text(json.dumps(info['meta'], indent=1), encoding='utf-8')
-            results.append({'name': info['name'], 'output': out_path.name,
-                            'flags': info['flags']})
-            job['done'] += 1
-        job['results'] = results
-        job['skipped'] = skipped
-        flagged = sum(1 for r in results if r['flags'])
-        job['summary'] = {
-            'restored': len(results), 'flagged': flagged, 'skipped': len(skipped)}
+            if info['status'] == 'skipped':
+                job['skipped'].append({'name': info['name'], 'reason': info['reason']})
+            elif info['status'] == 'cancelled':
+                job['cancelled'].append(info['name'])
+        flagged = sum(1 for r in job['results'] if r['flags'])
+        job['summary'] = {'restored': len(job['results']), 'flagged': flagged,
+                          'skipped': len(job['skipped']),
+                          'cancelled': len(job['cancelled'])}
         if models.device_warning():
             job['warnings'].insert(0, models.device_warning())
     except Exception as err:
@@ -172,7 +190,7 @@ def _run_job_thread(job):
         job['finished'] = time.time()
         job['stage'] = 'finished'
         models.unload_all()
-        _save_job(job)
+        _save_job(job, job_dir)
 
 
 # ---------------------------------------------------------------- endpoints
@@ -209,14 +227,16 @@ def create_job(req: JobRequest):
             'started': time.time(), 'finished': None,
             'device': models.device_name(),
             'device_warning': models.device_warning(),
-            'warnings': [], 'skipped': [], 'results': [],
+            'warnings': [], 'skipped': [], 'cancelled': [], 'results': [],
             'cancel': {'flag': False},
             'version': __version__,
         }
         JOBS[job['id']] = job
         _active_job_id = job['id']
-        _save_job(job)
-        threading.Thread(target=_run_job_thread, args=(job,), daemon=True).start()
+        job_dir = _job_dir(job['id'])
+        _save_job(job, job_dir)
+        threading.Thread(target=_run_job_thread, args=(job, job_dir),
+                         daemon=True).start()
         return {'job_id': job['id'], 'status': job['status']}
 
 
@@ -261,28 +281,36 @@ def rerun(req: RerunRequest):
         raise HTTPException(400, 'already at the highest-fidelity preset')
     with pipeline.PIPELINE_LOCK:
         old_output = entry['output'] if entry else None
+        written = {}
+
+        def sink(name, stem, ext, src_hash, meta, data):
+            job_dir = _job_dir(job['id'])
+            out_path = pipeline.output_name(job_dir, stem, ext, src_hash)
+            out_path.write_bytes(data)
+            (job_dir / 'restored' / (out_path.stem + '.json')).write_text(
+                json.dumps(meta, indent=1), encoding='utf-8')
+            written.update({'output': out_path.name, 'flags': meta.get('flags', [])})
+
         infos = pipeline.run_pipeline([src], new_preset, job['colorize'],
-                                      job['upscale_bg'])
+                                      job['upscale_bg'], sink=sink)
         info = infos[0]
-        if info.get('skip') or info.get('img_final') is None:
-            raise HTTPException(500, f're-run failed: {info.get("skip", "processing failed")}')
+        if info['status'] != 'done':
+            raise HTTPException(500,
+                                f're-run failed: {info.get("reason", "processing failed")}')
         job_dir = _job_dir(job['id'])
-        if old_output:
+        if old_output and old_output != written['output']:
             (job_dir / 'restored' / old_output).unlink(missing_ok=True)
             (job_dir / 'restored' / (Path(old_output).stem + '.json')).unlink(missing_ok=True)
-        out_path = pipeline.output_name(job_dir, info['stem'], info['ext'], info['src_hash'])
-        out_path.write_bytes(pipeline.encode_image(info['img_final'], info['ext']))
-        (job_dir / 'restored' / (out_path.stem + '.json')).write_text(
-            json.dumps(info['meta'], indent=1), encoding='utf-8')
-        new_entry = {'name': req.name, 'output': out_path.name, 'flags': info['flags']}
+        new_entry = {'name': req.name, 'output': written['output'],
+                     'flags': written['flags']}
         if entry:
             job['results'].remove(entry)
         job['results'].append(new_entry)
         job['rerun'] = {'name': req.name, 'from': current_preset, 'to': new_preset,
                         'at': time.time()}
-        _save_job(job)
-        return {'name': req.name, 'preset': new_preset, 'output': out_path.name,
-                'flags': info['flags']}
+        _save_job(job, job_dir)
+        return {'name': req.name, 'preset': new_preset, 'output': written['output'],
+                'flags': written['flags']}
 
 
 class CancelRequest(BaseModel):
@@ -298,6 +326,7 @@ def cancel(req: CancelRequest):
 
 @app.get('/pairs')
 def pairs(job_id: str = None):
+    from urllib.parse import quote
     job = _get_job(job_id) if job_id else _latest_job()
     job_dir = _job_dir(job['id'])
     restored_dir = job_dir / 'restored'
@@ -313,8 +342,9 @@ def pairs(job_id: str = None):
                 meta = {'errors': ['sidecar unreadable']}
         out.append({
             'name': entry['name'],
-            'before': f'/img/before?job_id={job["id"]}&name={Path(entry["name"]).name}',
-            'after': f'/img/after?job_id={job["id"]}&name={Path(entry["output"]).name}',
+            # quote() not quote_plus: spaces stay readable, & and # are escaped
+            'before': f'/img/before?job_id={job["id"]}&name={quote(Path(entry["name"]).name)}',
+            'after': f'/img/after?job_id={job["id"]}&name={quote(Path(entry["output"]).name)}',
             'flags': entry['flags'],
             'meta': meta,
         })
@@ -354,6 +384,9 @@ def export(req: ExportRequest):
     job_dir = _job_dir(job['id'])
     restored_dir = job_dir / 'restored'
     export_dir = job_dir / 'export'
+    if export_dir.exists():
+        # a previous export may hold files a re-run has replaced
+        shutil.rmtree(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
     copied = 0
     for entry in job.get('results', []):
@@ -362,6 +395,52 @@ def export(req: ExportRequest):
             shutil.copy2(src, export_dir / entry['output'])
             copied += 1
     return {'exported': copied, 'to': str(export_dir)}
+
+
+@app.get('/jobs')
+def jobs_history():
+    """Every job on disk, newest first, for the UI's history dropdown."""
+    items = []
+    if RESULTS_DIR.exists():
+        for d in RESULTS_DIR.iterdir():
+            meta = d / 'job.json'
+            if not meta.is_file():
+                continue
+            try:
+                j = json.loads(meta.read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                continue
+            items.append({
+                'id': j.get('id', d.name),
+                'folder': j.get('folder'),
+                'folder_name': j.get('folder_name'),
+                'status': j.get('status'),
+                'started': j.get('started'),
+                'summary': j.get('summary'),
+            })
+    items.sort(key=lambda x: x.get('started') or 0, reverse=True)
+    return {'jobs': items}
+
+
+class RevealRequest(BaseModel):
+    job_id: str
+    target: str = 'export'  # 'export' or 'restored'
+
+
+@app.post('/reveal')
+def reveal(req: RevealRequest):
+    """Open a job's folder in Windows Explorer (path pinned under results/)."""
+    import subprocess
+    if req.target not in ('export', 'restored'):
+        raise HTTPException(400, "target must be 'export' or 'restored'")
+    job_dir = _job_dir(req.job_id).resolve()
+    target = (job_dir / req.target).resolve()
+    if not str(target).startswith(str(job_dir)):
+        raise HTTPException(400, 'bad target')
+    if not target.is_dir():
+        raise HTTPException(404, f'{req.target} folder does not exist yet')
+    subprocess.Popen(['explorer', str(target)])
+    return {'opened': str(target)}
 
 
 class ImmichRequest(BaseModel):

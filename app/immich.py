@@ -25,6 +25,7 @@ import requests
 log = logging.getLogger(__name__)
 
 TIMEOUT = 60
+UPLOAD_TIMEOUT = 300  # multi-hundred-MB PNGs over wifi to a NAS
 UPLOAD_RETRIES = 3
 RETRY_BACKOFF = 2.0
 
@@ -119,7 +120,7 @@ class ImmichClient:
                 files = [('assetData', (file_path.name, fh, mime))]
                 try:
                     resp = self.session.post(self._url('/api/assets'), data=data,
-                                             files=files, timeout=TIMEOUT)
+                                             files=files, timeout=UPLOAD_TIMEOUT)
                     if resp.status_code in (200, 201):
                         body = resp.json()
                         return body.get('id') or body.get('asset', {}).get('id')

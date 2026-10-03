@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.0.1 — 2026-10-03
+
+Review-pass fixes and enhancements.
+
+- Photos are written to `restored/` the moment each one finishes; closing the
+  app mid-job keeps everything already written, and the job shows up as
+  "interrupted" on the next start (previously such a job blocked new ones
+  with a "already running" error until its status file was deleted).
+- Memory now stays flat per photo instead of growing with folder size —
+  inputs and intermediates are released as soon as each photo is written.
+- Filenames with `&`, `#`, `+` or spaces no longer break the gallery
+  (URLs are percent-encoded).
+- Previous jobs list in the UI; pick an old job to browse its gallery again.
+- "Show in Explorer" button next to export; re-exporting replaces the export
+  folder instead of leaving stale files.
+- Elapsed time and ETA while a job runs; "not processed" counter when a job
+  is stopped.
+- Zero-byte leftover model files from a crashed first run are re-downloaded
+  instead of failing model load; interrupted downloads clean up their
+  `.part` files and progress entry.
+- Immich upload timeout raised to 300 s for large PNGs over slow links.
+- Tests: 25 (endpoint tests via FastAPI TestClient, crash-recovery, URL
+  encoding, export wipe, retry-queue flake fixed with a threaded mock).
+
 ## 1.0.0 — 2026-10-03
 
 First release.

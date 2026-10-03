@@ -1,6 +1,24 @@
 # PROGRESS — shoebox
 
-Status: **v1.0.0 complete and verified end-to-end.** (2026-10-03)
+Status: **v1.0.1 complete and verified end-to-end.** (2026-10-03)
+
+## 1.0.1 review loop (this round)
+
+- Crash resilience: per-photo incremental writes to restored/; interrupted
+  jobs recover cleanly on restart (verified live: mid-job kill → restart →
+  job marked interrupted with warning, new job starts immediately — before
+  the fix such a job 409-blocked every new job)
+- Flat per-photo memory: inputs/intermediates dropped per photo; folder size
+  no longer scales RAM
+- Gallery URLs percent-encoded (filenames with `&`, `#`, `+` verified live
+  with a file named `Oma & Opa 1961.jpg`)
+- Job history dropdown (GET /jobs), Show-in-Explorer (POST /reveal, path
+  pinned under results/), export wipe on re-export, elapsed/ETA, cancelled
+  counter
+- ensure_weights: zero-byte leftovers re-downloaded, .part cleanup,
+  download-status reset on failure; Immich upload timeout 300 s
+- Tests: 25/25 (new tests/test_main.py via FastAPI TestClient; threaded
+  HTTP/1.1 mock server killed a recurring 10053 flake)
 
 ## What works (verified on this machine, RTX 4090, torch 2.14.1+cu126)
 

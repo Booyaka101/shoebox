@@ -48,6 +48,12 @@ http://127.0.0.1:8545 in your browser.
 6. **Export** copies the restored set to the job's `export` folder, and
    **Push to Immich** uploads it to your own Immich server.
 
+Each photo is written to disk the moment it finishes, so closing the app
+mid-job keeps the work — the job shows up as *interrupted* on the next
+start and everything else keeps working. Memory use stays flat no matter
+how large the folder is. The **Previous jobs** dropdown reopens any past
+job's gallery.
+
 A real run (the five LOC sample photos in `examples/loc-families/`, plus a
 corrupt file) on an RTX 4090, balanced preset, colorize and 2x upscale on:
 

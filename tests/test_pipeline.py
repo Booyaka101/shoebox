@@ -53,11 +53,24 @@ def run(tmp_path_factory):
     # to pure gray, which also exercises the colorize-skip heuristic on the
     # already-color duplicate (kept color here: saturation above threshold)
 
+    restored = work / 'restored'
+    restored.mkdir()
+    written = {}
+
+    def sink(name, stem, ext, src_hash, meta, data):
+        out = pipeline.output_name(work, stem, ext, src_hash)
+        out.write_bytes(data)
+        out.parent.joinpath(out.stem + '.json').write_text(json.dumps(meta))
+        written[name] = out.name
+
     src_hashes = {p.name: sha256(folder / p.name) for p in folder.iterdir()}
     infos = pipeline.run_pipeline(
-        pipeline.find_images(folder), 'low', colorize=True, upscale_bg=False)
+        pipeline.find_images(folder), 'low', colorize=True, upscale_bg=False,
+        sink=sink)
     return {
         'folder': folder,
+        'restored': restored,
+        'written': written,
         'infos': {i['name']: i for i in infos},
         'src_hashes': src_hashes,
     }
@@ -69,44 +82,45 @@ def test_originals_byte_identical(run):
 
 
 def test_outputs_exist_for_all_corpus_photos(run):
-    restored = run['folder'].parent  # infos carry paths, check via meta hashes
     for info in run['infos'].values():
-        if info['name'] == 'corrupt.jpg':
+        if info['status'] == 'skipped':
             continue
-        assert 'img_final' in info and info['img_final'] is not None, info['name']
+        assert info['status'] == 'done', info['name']
+        assert info['name'] in run['written'], info['name']
+        out = run['restored'].parent / 'restored' / run['written'][info['name']]
+        assert out.is_file() and out.stat().st_size > 0, info['name']
         assert info['meta']['source_hash'] == run['src_hashes'][info['name']]
 
 
 def test_corrupt_file_skipped_with_reason(run):
     info = run['infos']['corrupt.jpg']
-    assert 'skip' in info
-    assert 'unreadable' in info['skip']
+    assert info['status'] == 'skipped'
+    assert 'unreadable' in info['reason']
 
 
 def test_grayscale_input_gains_chroma(run):
     # the 1939 scan is a true grayscale scan (chroma variance 0.0); the 1936
     # migrant scan carries a slight tint and is correctly treated as color
     info = run['infos']['1939-sisters-san-antonio.jpg']
-    assert info['was_gray'], 'corpus photo should read as grayscale'
-    out_rgb = cv2.cvtColor(info['img_final'], cv2.COLOR_BGR2RGB)
-    in_rgb = cv2.cvtColor(info['img_in'], cv2.COLOR_BGR2RGB)
-    assert qa.chroma_variance(out_rgb) > qa.chroma_variance(in_rgb) + 5.0
-    assert info['meta']['models']['colorize'] == 'DeOldify ColorizeArtistic_gen.pth'
+    meta = info['meta']
+    assert meta['chroma_in'] == 0.0, 'corpus photo should read as grayscale'
+    assert meta['chroma_out'] > meta['chroma_in'] + 5.0
+    assert meta['models']['colorize'] == 'DeOldify ColorizeArtistic_gen.pth'
 
 
 def test_tinted_photo_skips_colorization(run):
     # the 1936 nitrate scan has residual tint above the saturation threshold,
     # so the pipeline must not colorize it
     info = run['infos']['1936-migrant-family-nipomo.jpg']
-    assert not info['was_gray']
-    assert not info['colorize_needed']
-    assert info['meta']['models']['colorize'] is None
+    meta = info['meta']
+    assert meta['chroma_in'] > 10.0, 'the nitrate scan should read as tinted'
+    assert meta['models']['colorize'] is None
+    assert info['name'] in run['written']
 
 
 def test_face_photo_yields_face_or_flag(run):
     for name in ('1939-sisters-san-antonio.jpg', '1940-chamisal-family-dinner.jpg'):
-        info = run['infos'][name]
-        meta = info['meta']
+        meta = run['infos'][name]['meta']
         ok = meta['face_count_out'] >= 1 or meta['flags']
         assert ok, f'{name}: faces {meta["face_count_in"]}->{meta["face_count_out"]}, flags {meta["flags"]}'
         assert meta['face_count_in'] >= 1, f'{name}: detector found nothing in a face photo'
@@ -115,7 +129,7 @@ def test_face_photo_yields_face_or_flag(run):
 def test_metadata_has_all_required_keys(run):
     required = pipeline.required_metadata_keys()
     for info in run['infos'].values():
-        if info.get('skip'):
+        if info['status'] != 'done':
             continue
         missing = required - set(info['meta'].keys())
         assert not missing, f'{info["name"]} missing {missing}'
@@ -128,6 +142,8 @@ def test_dupe_stem_collision_gets_hash_suffix(run):
     assert len(dupe_infos) == 2
     hashes = {i['meta']['source_hash'] for i in dupe_infos}
     assert len(hashes) == 1, 'same content should hash identically'
+    outputs = {run['written'][n] for n in run['written'] if n.startswith('dupe.')}
+    assert len(outputs) == 2, 'collision should produce two distinct output names'
 
 
 def test_already_color_photo_skips_colorization(run):
@@ -170,12 +186,17 @@ def test_face_restoration_failure_is_flagged_not_passed_through(run, monkeypatch
     real_helper, _ = models.get_codeformer()
     monkeypatch.setattr(models, 'get_codeformer',
                         lambda: (real_helper, BrokenNet()))
-    infos = pipeline.run_pipeline([path], 'low', colorize=False, upscale_bg=False)
+    sink_out = {}
+    infos = pipeline.run_pipeline(
+        [path], 'low', colorize=False, upscale_bg=False,
+        sink=lambda name, stem, ext, h, meta, data: sink_out.update(name=name, data=data))
     info = infos[0]
-    assert info['meta']['face_count_in'] >= 1
-    assert qa.FACE_FAILED in info['meta']['flags']
-    assert info['img_final'] is not None, 'restored copy must still be produced'
-    assert any('restoration failed' in e for e in info['meta']['errors'])
+    meta = info['meta']
+    assert meta['face_count_in'] >= 1
+    assert qa.FACE_FAILED in meta['flags']
+    assert info['status'] == 'done', 'restored copy must still be produced'
+    assert sink_out.get('data'), 'output bytes must reach the sink'
+    assert any('restoration failed' in e for e in meta['errors'])
 
 
 def test_qa_rules_unit():

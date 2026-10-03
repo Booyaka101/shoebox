@@ -105,30 +105,41 @@ def download_status():
 
 
 def ensure_weights(names):
-    """Download any missing weights, streaming progress into _download_status."""
+    """Download any missing weights, streaming progress into _download_status.
+    A zero-byte leftover from a crashed download counts as missing, and stale
+    .part files are removed before a fresh attempt."""
     import requests
-    missing = [n for n in names if not weights_path(n).exists()]
+    for name in names:
+        stale = weights_path(name)
+        if stale.suffix == '.pth' and stale.exists() and stale.stat().st_size == 0:
+            stale.unlink()
+    missing = [n for n in names
+               if not weights_path(n).exists() or weights_path(n).stat().st_size == 0]
     for name in missing:
         url = WEIGHT_URLS[name]
         target = weights_path(name)
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(target.suffix + '.part')
+        if tmp.exists():
+            tmp.unlink()
         log.info('downloading %s weights: %s', name, url)
-        with requests.get(url, stream=True, timeout=120) as resp:
-            resp.raise_for_status()
-            total = int(resp.headers.get('content-length', 0))
-            _download_status[name] = {'done': 0, 'total': total}
-            done = 0
-            with open(tmp, 'wb') as fh:
-                for chunk in resp.iter_content(chunk_size=1 << 20):
-                    fh.write(chunk)
-                    done += len(chunk)
-                    _download_status[name] = {'done': done, 'total': total}
-        _download_status.pop(name, None)
-        if target.exists() and target.stat().st_size > 0:
-            target.unlink()
-        tmp.rename(target)
-        log.info('downloaded %s -> %s', name, target)
+        try:
+            with requests.get(url, stream=True, timeout=120) as resp:
+                resp.raise_for_status()
+                total = int(resp.headers.get('content-length', 0))
+                _download_status[name] = {'done': 0, 'total': total}
+                done = 0
+                with open(tmp, 'wb') as fh:
+                    for chunk in resp.iter_content(chunk_size=1 << 20):
+                        fh.write(chunk)
+                        done += len(chunk)
+                        _download_status[name] = {'done': done, 'total': total}
+            if target.exists():
+                target.unlink()
+            tmp.rename(target)
+            log.info('downloaded %s -> %s', name, target)
+        finally:
+            _download_status.pop(name, None)
     return missing
 
 

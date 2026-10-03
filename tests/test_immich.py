@@ -2,7 +2,7 @@
 
 import json
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -11,7 +11,13 @@ from app.immich import ImmichClient, ImmichError, push_to_immich
 
 
 class MockImmich(BaseHTTPRequestHandler):
-    """Just enough of the Immich REST API for the push flow."""
+    """Just enough of the Immich REST API for the push flow.
+
+    HTTP/1.1 with correct Content-Length lets the client's session reuse one
+    connection for the whole test, which keeps Windows loopback churn (and
+    its occasional 10053 resets) out of the picture."""
+
+    protocol_version = 'HTTP/1.1'
 
     def log_message(self, *args):
         pass
@@ -76,19 +82,18 @@ class MockImmich(BaseHTTPRequestHandler):
             self._json(404, {'error': 'not found'})
 
 
-class QuietServer(HTTPServer):
-    """The client opens a fresh connection per upload; give the
-    single-threaded server headroom so rapid create/teardown can't refuse
-    connections (socketserver's default backlog is 5)."""
+class QuietServer(ThreadingHTTPServer):
+    """Threaded so uploads never serialize behind a half-closed connection;
+    daemon_threads keep pytest from hanging on teardown."""
 
-    request_queue_size = 64
+    daemon_threads = True
 
 
 received = []
 
 
-@pytest.fixture()
-def server(tmp_path):
+@pytest.fixture(scope='module')
+def server():
     MockImmich.albums = []
     MockImmich.assets = []
     MockImmich.pending_ids = []
@@ -99,6 +104,16 @@ def server(tmp_path):
     thread.start()
     yield f'http://127.0.0.1:{httpd.server_port}'
     httpd.shutdown()
+    httpd.server_close()
+
+
+@pytest.fixture()
+def reset_mock(server):
+    MockImmich.albums = []
+    MockImmich.assets = []
+    MockImmich.pending_ids = []
+    MockImmich.upload_attempts = {}
+    received.clear()
 
 
 def _photo(tmp_path, name, content=b'fake jpeg bytes'):
@@ -114,7 +129,7 @@ def test_ping_failure_is_readable():
     assert 'cannot reach Immich' in str(exc.value)
 
 
-def test_push_uploads_and_creates_album(server, tmp_path):
+def test_push_uploads_and_creates_album(server, reset_mock, tmp_path):
     photo = _photo(tmp_path, 'a_restored.jpg', b'AAA')
     queue = tmp_path / 'queue.json'
     uploaded, already, failed, added = push_to_immich(
@@ -125,7 +140,7 @@ def test_push_uploads_and_creates_album(server, tmp_path):
     assert not queue.exists()
 
 
-def test_push_skips_photos_already_in_album(server, tmp_path):
+def test_push_skips_photos_already_in_album(server, reset_mock, tmp_path):
     photo = _photo(tmp_path, 'a_restored.jpg', b'AAA')
     queue = tmp_path / 'queue.json'
     push_to_immich(ImmichClient(server, 'key'), [photo], 'Restored scans', queue)
@@ -134,7 +149,7 @@ def test_push_skips_photos_already_in_album(server, tmp_path):
     assert uploaded == 0 and already == 1 and failed == 0
 
 
-def test_failed_upload_lands_in_retry_queue(server, tmp_path):
+def test_failed_upload_lands_in_retry_queue(server, reset_mock, tmp_path):
     good = _photo(tmp_path, 'good_restored.jpg', b'AAA')
     bad = _photo(tmp_path, 'bad_restored.jpg', b'BBB')
     queue = tmp_path / 'queue.json'
@@ -145,7 +160,7 @@ def test_failed_upload_lands_in_retry_queue(server, tmp_path):
     assert json.loads(queue.read_text()) == [str(bad)]
 
 
-def test_retry_queue_is_drained_on_next_push(server, tmp_path):
+def test_retry_queue_is_drained_on_next_push(server, reset_mock, tmp_path):
     good = _photo(tmp_path, 'good_restored.jpg', b'AAA')
     bad = _photo(tmp_path, 'bad_restored.jpg', b'BBB')
     queue = tmp_path / 'queue.json'
