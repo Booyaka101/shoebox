@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shoebox"
+description = "Free, local, batch photo-archive restorer: DeOldify colorization + CodeFormer face restoration over a folder of scans, with a review gallery, QA flags, export and optional Immich push."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "shoebox contributors" }]
+keywords = [
+    "photo-restoration", "colorization", "deoldify", "codeformer",
+    "face-restoration", "genealogy", "immich", "local-first", "gpu",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Web Environment",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Multimedia :: Graphics :: Image Processing",
+]
+dynamic = ["dependencies", "version"]
+
+[project.urls]
+Documentation = "https://github.com/shoebox-restorer/shoebox#readme"
+
+[project.scripts]
+shoebox = "app.main:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "app.__version__" }
+dependencies = { file = "requirements.txt" }
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

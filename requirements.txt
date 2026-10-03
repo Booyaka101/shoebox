@@ -1,0 +1,10 @@
+# torch and torchvision are NOT listed here on purpose: they must come from
+# the CUDA wheel index, which run.bat installs first:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+fastapi>=0.110
+uvicorn>=0.36
+opencv-python>=4.9
+pillow>=10.0
+numpy>=1.26
+requests>=2.31
+pytest>=8.0

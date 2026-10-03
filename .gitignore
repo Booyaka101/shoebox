@@ -1,0 +1,21 @@
+# runtime
+.venv/
+weights/
+results/
+outputs/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# model parts left over from interrupted downloads
+*.part
+
+# local scratch
+.scratch/
+dist/
+.scratch/chrome-profile/
+.scratch/cleanvenv/
+build/
