@@ -2,7 +2,24 @@
 
 Status: **v1.0.4 complete and verified end-to-end.** (2026-10-04)
 
-## 1.0.4 review loop (this round)
+## Published
+
+- Repo: https://github.com/Booyaka101/shoebox (public, master default branch)
+- Release: https://github.com/Booyaka101/shoebox/releases/tag/v1.0.5 with
+  `shoebox-1.0.5.zip` attached (verified: asset listed, not a draft)
+- Tag v1.0.5 pushed; repo description + topics set
+
+## 1.0.5 UI/UX round (this round)
+
+- Lightbox viewer (View large / double-click; A|B flip, slider, arrow-key
+  navigation, Space flip, Esc close), `#lightbox` deep-link
+- Live gallery: finished photos appear in the grid during the run
+- All/Clean/Flagged filter tabs; gallery sorted by filename
+- "Use 5 sample photos" onboarding button (GET /sample_folder)
+- Job warnings box; Immich album-name field; hover states
+- Tests: 36/36. Release zip install-verified from a clean venv.
+
+## 1.0.4 review loop
 
 - History across restarts: every past job opens from disk after a restart
   (gallery, export, contact sheet, Immich) — previously only the newest
