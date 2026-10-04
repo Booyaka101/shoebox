@@ -493,6 +493,7 @@ def pairs(job_id: str = None):
             'flags': entry['flags'],
             'meta': meta,
         })
+    out.sort(key=lambda p: p['name'].lower())
     return {'job_id': job['id'], 'folder': str(folder), 'pairs': out, 'summary': job.get('summary')}
 
 
@@ -633,6 +634,15 @@ def contactsheet(req: ContactSheetRequest):
     out = job_dir / 'contact-sheet.pdf'
     pages = sheet.build(files, out)
     return {'pages': pages, 'photos': len(files), 'to': str(out)}
+
+
+@app.get('/sample_folder')
+def sample_folder():
+    """The bundled public-domain sample photos, for a first try."""
+    folder = PROJECT_ROOT / 'examples' / 'loc-families'
+    if not folder.is_dir():
+        raise HTTPException(404, 'sample folder not found')
+    return {'folder': str(folder)}
 
 
 @app.get('/pick_folder')

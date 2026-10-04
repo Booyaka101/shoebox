@@ -20,12 +20,14 @@
   h2 { font-size:15px; margin:0 0 12px; text-transform:uppercase; letter-spacing:.06em;
        color:var(--dim); }
   label { display:block; font-size:13px; color:var(--dim); margin:8px 0 4px; }
-  input[type=text], input[type=password] { width:100%; padding:8px 10px; border-radius:6px;
+  input[type=text], input[type=password], select { width:100%; padding:8px 10px; border-radius:6px;
         border:1px solid var(--line); background:#12141a; color:var(--text); font-size:14px; }
   button { padding:8px 16px; border-radius:6px; border:1px solid var(--line);
            background:#2a2f38; color:var(--text); font-size:14px; cursor:pointer; }
+  button:hover:not(:disabled) { background:#343a45; }
   button.primary { background:var(--accent); border-color:var(--accent); color:#141414;
                    font-weight:600; }
+  button.primary:hover:not(:disabled) { background:#ecb84f; }
   button:disabled { opacity:.45; cursor:default; }
   .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
   .row > * { flex:0 0 auto; }
@@ -44,11 +46,17 @@
   .banner { background:#4a3a14; color:var(--warn); border:1px solid #6b541c;
             padding:8px 12px; border-radius:6px; margin:8px 0; font-size:13px; display:none; }
   .banner.show { display:block; }
+  .warnbox { background:#2a2026; border:1px solid #5c3a3a; color:#f0b0a0;
+             padding:8px 12px; border-radius:6px; margin:8px 0; font-size:13px; display:none;
+             white-space:pre-wrap; }
+  .warnbox.show { display:block; }
   .stat { display:inline-block; margin-right:18px; }
   .stat b { font-size:20px; }
   .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:14px; }
+  .grid[data-filter="clean"] .card[data-status="flagged"],
+  .grid[data-filter="flagged"] .card[data-status="clean"] { display:none; }
   .card { border:1px solid var(--line); border-radius:8px; overflow:hidden; background:#12141a; }
-  .card .imgwrap { position:relative; aspect-ratio:4/3; background:#000; }
+  .card .imgwrap { position:relative; aspect-ratio:4/3; background:#000; cursor:zoom-in; }
   .card img { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; }
   .card img.after { clip-path:inset(0 0 0 var(--split,50%)); }
   .card .divider { position:absolute; top:0; bottom:0; left:var(--split,50%);
@@ -67,6 +75,25 @@
   .msg { font-size:13px; color:var(--dim); margin-top:6px; white-space:pre-wrap; }
   #queue .card { margin-bottom:10px; }
   .kv { font-size:12px; color:var(--dim); margin-top:4px; }
+  .tabs { display:flex; gap:8px; margin-bottom:12px; }
+  .tab { padding:5px 14px; font-size:13px; }
+  .tab.active { background:var(--accent); border-color:var(--accent); color:#141414; font-weight:600; }
+  /* lightbox */
+  #lightbox { position:fixed; inset:0; background:rgba(8,9,11,.94); z-index:50;
+              display:none; flex-direction:column; }
+  #lightbox.open { display:flex; }
+  #lb_stage { flex:1; position:relative; overflow:hidden; }
+  #lb_stage img { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; }
+  #lb_stage img.after { clip-path:inset(0 0 0 var(--split,50%)); }
+  #lb_divider { position:absolute; top:0; bottom:0; left:var(--split,50%); width:2px;
+                background:var(--accent); pointer-events:none; }
+  #lb_bar { display:flex; gap:12px; align-items:center; padding:10px 16px;
+            background:var(--panel); border-top:1px solid var(--line); flex-wrap:wrap; }
+  #lb_bar input[type=range] { flex:1; min-width:200px; }
+  #lb_name { font-size:13px; word-break:break-all; }
+  #lb_close { position:absolute; top:10px; right:14px; font-size:20px; z-index:2;
+              background:rgba(0,0,0,.6); }
+  .lb_nav { font-size:18px; padding:6px 14px; }
 </style>
 </head>
 <body>
@@ -84,6 +111,7 @@
         <input type="text" id="folder" placeholder="C:\Users\you\Pictures\scans">
       </div>
       <button id="browse" title="Native folder picker">Browse…</button>
+      <button id="sample" title="Bundled public-domain sample photos">Use 5 sample photos</button>
     </div>
     <div class="preset">
       <label><input type="radio" name="preset" value="low"> low fidelity
@@ -125,11 +153,19 @@
       <button id="resume" class="hidden">Resume</button>
       <button id="cancel">Stop after current photo</button>
     </div>
+    <div class="warnbox" id="warnbox"></div>
   </section>
 
   <section id="review" class="hidden">
     <h2>3 · Review</h2>
-    <div class="msg">Drag on a photo to compare. Flagged photos are queued at the bottom.</div>
+    <div class="row" style="margin-bottom:10px">
+      <div class="tabs">
+        <button class="tab active" data-filter="all" id="tab_all">All</button>
+        <button class="tab" data-filter="clean" id="tab_clean">Clean</button>
+        <button class="tab" data-filter="flagged" id="tab_flagged">Flagged</button>
+      </div>
+      <span class="msg" style="margin:0">Drag on a photo to compare · click to view large</span>
+    </div>
     <div class="grid" id="gallery"></div>
   </section>
 
@@ -151,15 +187,34 @@
         <input type="text" id="immich_url" placeholder="http://nas:2283"></div>
       <div class="grow"><label for="immich_key">API key</label>
         <input type="password" id="immich_key" placeholder="Immich API key"></div>
+      <div class="grow"><label for="immich_album">Album name (optional)</label>
+        <input type="text" id="immich_album" placeholder="Restored &lt;folder name&gt;"></div>
       <button id="push">Push to Immich</button>
     </div>
     <div class="msg" id="immichmsg"></div>
   </section>
 </main>
 
+<div id="lightbox">
+  <button id="lb_close" title="Close (Esc)">✕</button>
+  <div id="lb_stage">
+    <img class="before" id="lb_before" alt="original">
+    <img class="after" id="lb_after" alt="restored">
+    <div id="lb_divider"></div>
+  </div>
+  <div id="lb_bar">
+    <button class="lb_nav" id="lb_prev" title="Previous (←)">←</button>
+    <button class="lb_nav" id="lb_toggle" title="Toggle original/restored (Space)">A|B</button>
+    <input type="range" id="lb_range" min="0" max="100" value="50">
+    <button class="lb_nav" id="lb_next" title="Next (→)">→</button>
+    <span id="lb_name"></span>
+  </div>
+</div>
+
 <script>
 const $ = (id) => document.getElementById(id);
 let jobId = null, pollTimer = null, running = false;
+let displayPairs = [], renderedCards = new Map(), currentFilter = 'all';
 
 function show(el, on) { el.classList.toggle('hidden', !on); }
 
@@ -178,6 +233,15 @@ function banner(text) {
   else el.classList.remove('show');
 }
 
+function showWarnings(job) {
+  const box = $('warnbox');
+  const items = (job && job.warnings) || [];
+  if (items.length) {
+    box.textContent = items.join('\n');
+    box.classList.add('show');
+  } else box.classList.remove('show');
+}
+
 async function initStatus() {
   try {
     const s = await api('/status');
@@ -187,7 +251,7 @@ async function initStatus() {
     if (s.job) {
       jobId = s.job.id;
       if (['queued','running'].includes(s.job.status)) startPolling();
-      else renderDone(s.job);
+      else { renderDone(s.job); showWarnings(s.job); }
     }
   } catch (e) { banner('server error: ' + e.message); }
 }
@@ -196,6 +260,14 @@ $('browse').onclick = async () => {
   try {
     const r = await api('/pick_folder');
     if (r.folder) $('folder').value = r.folder;
+  } catch (e) { $('startmsg').textContent = e.message; }
+};
+
+$('sample').onclick = async () => {
+  try {
+    const r = await api('/sample_folder');
+    $('folder').value = r.folder;
+    $('startmsg').textContent = 'Sample photos loaded — press Start for a first look.';
   } catch (e) { $('startmsg').textContent = e.message; }
 };
 
@@ -214,6 +286,7 @@ $('start').onclick = async () => {
       `Queued behind ${r.queued_behind} job(s) — it will start automatically.`;
     show($('run'), true); show($('review'), false); show($('queuewrap'), false); show($('out'), false);
     $('gallery').innerHTML = ''; $('queue').innerHTML = '';
+    renderedCards.clear();
     $('bar').style.width = '0%';
     $('stagename').textContent = 'queued';
     startPolling();
@@ -222,6 +295,20 @@ $('start').onclick = async () => {
 };
 
 $('cancel').onclick = () => jobId && api('/cancel', {job_id: jobId}).catch(()=>{});
+$('pause').onclick = async () => {
+  try {
+    await api('/pause', {job_id: jobId});
+    $('stagename').textContent = 'pausing — finishing the current photo…';
+  } catch (e) { $('startmsg').textContent = e.message; }
+};
+$('resume').onclick = async () => {
+  try {
+    await api('/resume', {job_id: jobId});
+    running = true;
+    show($('review'), false); show($('queuewrap'), false);
+    startPolling();
+  } catch (e) { $('startmsg').textContent = e.message; }
+};
 
 function startPolling() {
   clearInterval(pollTimer);
@@ -234,6 +321,8 @@ function fmtDuration(sec) {
   const m = Math.floor(sec / 60), s = sec % 60;
   return m ? `${m}m ${s}s` : `${s}s`;
 }
+
+let lastRenderedCount = -1;
 
 async function poll() {
   if (!jobId) return;
@@ -282,9 +371,80 @@ async function poll() {
   $('pause').disabled = !active;
   show($('pause'), active);
   show($('resume'), resumable);
+  showWarnings(job);
 
-  if (!active && running && !resumable) { running = false; clearInterval(pollTimer); renderDone(job); }
+  // photos appear in the gallery as they finish, not only at the end
+  const n = (job.results || []).length;
+  if (n > 0 && n !== lastRenderedCount && !$('lightbox').classList.contains('open')) {
+    lastRenderedCount = n;
+    refreshFromPairs();
+  }
+
+  if (!active && running && !resumable) {
+    running = false; clearInterval(pollTimer); lastRenderedCount = -1;
+    renderDone(job);
+  }
   if (isPaused && running) { running = false; clearInterval(pollTimer); renderDone(job); }
+}
+
+async function refreshFromPairs() {
+  let p;
+  try { p = await api('/pairs?job_id=' + jobId); } catch (e) { return; }
+  renderGallery(p.pairs, p.summary);
+}
+
+function metaLine(meta) {
+  meta = meta || {};
+  const v = (x) => x === undefined || x === null ? '—' : x;
+  const outDims = (meta.w_out && meta.w_out !== meta.w_in)
+    ? ` · out ${v(meta.w_out)}×${v(meta.h_out)}` : '';
+  return `w=${v(meta.w_final ?? meta.w)} · faces ${v(meta.face_count_in)}→${v(meta.face_count_out)} · sharp ${v(meta.sharpness_in)}→${v(meta.sharpness_out)}${outDims}`;
+}
+
+function renderGallery(pairs, summary) {
+  displayPairs = pairs;
+  const gal = $('gallery');
+  const seen = new Set();
+  for (const pair of pairs) {
+    seen.add(pair.name);
+    const el = card(pair, false);
+    const old = renderedCards.get(pair.name);
+    if (old) gal.replaceChild(el, old); else gal.appendChild(el);
+    renderedCards.set(pair.name, el);
+  }
+  // drop cards for photos that vanished (e.g. deleted job)
+  for (const [name, el] of [...renderedCards]) {
+    if (!seen.has(name)) { el.remove(); renderedCards.delete(name); }
+  }
+  applyFilter();
+  show($('review'), pairs.length > 0);
+}
+
+function renderQueueAndNotes(job) {
+  const q = $('queue');
+  q.innerHTML = '';
+  let flagged = 0;
+  for (const pair of displayPairs) {
+    if (pair.flags && pair.flags.length) {
+      flagged++;
+      q.appendChild(card(pair, true));
+    }
+  }
+  show($('queuewrap'), flagged > 0);
+  const notes = [];
+  const skipped = (job && job.skipped) || [];
+  const cancelled = (job && job.cancelled) || [];
+  if (skipped.length) notes.push('Skipped: ' + skipped.map(s => `${s.name} (${s.reason})`).join(', '));
+  if (cancelled.length) notes.push('Not processed (stopped): ' + cancelled.join(', '));
+  let noteEl = $('review').querySelector('.notes');
+  if (notes.length) {
+    if (!noteEl) {
+      noteEl = document.createElement('div');
+      noteEl.className = 'msg notes';
+      $('review').appendChild(noteEl);
+    }
+    noteEl.textContent = notes.join(' · ');
+  } else if (noteEl) noteEl.remove();
 }
 
 async function renderDone(job) {
@@ -292,37 +452,16 @@ async function renderDone(job) {
   show($('out'), true);
   let p;
   try { p = await api('/pairs?job_id=' + job.id); } catch (e) { return; }
-  const gal = $('gallery'), q = $('queue');
-  gal.innerHTML = ''; q.innerHTML = '';
-  let flagged = 0;
-  for (const pair of p.pairs) {
-    const meta = pair.meta || {};
-    const v = (x) => x === undefined || x === null ? '—' : x;
-    const outDims = (meta.w_out && meta.w_out !== meta.w_in)
-      ? ` · out ${v(meta.w_out)}×${v(meta.h_out)}` : '';
-    const m = `w=${v(meta.w_final ?? meta.w)} · faces ${v(meta.face_count_in)}→${v(meta.face_count_out)} · sharp ${v(meta.sharpness_in)}→${v(meta.sharpness_out)}${outDims}`;
-    gal.appendChild(card(pair, false, m));
-    if (pair.flags && pair.flags.length) { flagged++; q.appendChild(card(pair, true, m)); }
-  }
-  show($('review'), p.pairs.length > 0);
-  show($('queuewrap'), flagged > 0);
-  const skipped = (job.skipped || []);
-  const cancelled = (job.cancelled || []);
-  const notes = [];
-  if (skipped.length) notes.push('Skipped: ' + skipped.map(s => `${s.name} (${s.reason})`).join(', '));
-  if (cancelled.length) notes.push('Not processed (stopped): ' + cancelled.join(', '));
-  if (notes.length) {
-    const d = document.createElement('div');
-    d.className = 'msg';
-    d.textContent = notes.join(' · ');
-    $('review').appendChild(d);
-  }
+  renderGallery(p.pairs, p.summary);
+  renderQueueAndNotes(job);
 }
 
-function card(pair, queued, metaLine) {
+function card(pair, queued) {
   const div = document.createElement('div');
   div.className = 'card';
-  const flags = (pair.flags && pair.flags.length)
+  const flagged = pair.flags && pair.flags.length;
+  div.dataset.status = flagged ? 'flagged' : 'clean';
+  const chips = flagged
     ? pair.flags.map(f => `<span class="chip">${f}</span>`).join('')
     : '<span class="chip clean">clean</span>';
   div.innerHTML = `
@@ -335,25 +474,88 @@ function card(pair, queued, metaLine) {
     </div>
     <div class="body">
       <div class="name">${pair.name}</div>
-      <div>${flags}</div>
-      <div class="kv">${metaLine || ''}</div>
+      <div>${chips}</div>
+      <div class="kv">${metaLine(pair.meta)}</div>
+      <button class="viewlarge" style="margin-top:6px">View large</button>
       ${queued ? '<button class="rerun" style="margin-top:6px">Re-run at higher fidelity</button>' : ''}
-    </div>`;;
+    </div>`;
   const wrap = div.querySelector('.imgwrap');
   const slider = div.querySelector('input[type=range]');
   const apply = () => { wrap.style.setProperty('--split', slider.value + '%'); };
   slider.oninput = apply; apply();
+  // the range input covers the image, so the lightbox opens on double-click
+  // or the View button — a single click must stay a compare drag
+  wrap.addEventListener('dblclick', () => openLightbox(pair.name));
+  const viewBtn = div.querySelector('.viewlarge');
+  viewBtn.onclick = () => openLightbox(pair.name);
   const btn = div.querySelector('.rerun');
-  if (btn) btn.onclick = async () => {
+  if (btn) btn.onclick = async (e) => {
+    e.stopPropagation();
     btn.disabled = true; btn.textContent = 'Re-running…';
     try {
       const r = await api('/rerun', {job_id: jobId, name: pair.name});
       btn.textContent = `done — now ${r.preset}`;
-      renderDone({id: jobId});
-    } catch (e) { btn.textContent = e.message; btn.disabled = false; }
+      refreshFromPairs().then(() => renderQueueAndNotes({skipped: [], cancelled: []}));
+    } catch (err) { btn.textContent = err.message; btn.disabled = false; }
   };
   return div;
 }
+
+// ---- gallery filters ----
+function applyFilter() {
+  $('gallery').dataset.filter = currentFilter;
+  $('tab_all').classList.toggle('active', currentFilter === 'all');
+  $('tab_clean').classList.toggle('active', currentFilter === 'clean');
+  $('tab_flagged').classList.toggle('active', currentFilter === 'flagged');
+}
+for (const tab of document.querySelectorAll('.tab')) {
+  tab.onclick = () => { currentFilter = tab.dataset.filter; applyFilter(); };
+}
+
+// ---- lightbox ----
+let lbIndex = -1;
+function lbPair() { return displayPairs[lbIndex] || null; }
+
+function openLightbox(name) {
+  lbIndex = displayPairs.findIndex(p => p.name === name);
+  if (lbIndex < 0) return;
+  $('lightbox').classList.add('open');
+  showLb();
+}
+function showLb() {
+  const pair = lbPair();
+  if (!pair) { closeLightbox(); return; }
+  $('lb_before').src = pair.before;
+  $('lb_after').src = pair.after;
+  $('lb_name').textContent = pair.name + (pair.flags && pair.flags.length
+    ? ' — ' + pair.flags.join(' · ') : '');
+  setSplit(50);
+}
+function setSplit(pct) {
+  $('lb_range').value = pct;
+  $('lb_stage').style.setProperty('--split', pct + '%');
+}
+function closeLightbox() {
+  $('lightbox').classList.remove('open');
+  refreshFromPairs();
+}
+function lbStep(d) {
+  if (!displayPairs.length) return;
+  lbIndex = (lbIndex + d + displayPairs.length) % displayPairs.length;
+  showLb();
+}
+$('lb_close').onclick = closeLightbox;
+$('lb_prev').onclick = () => lbStep(-1);
+$('lb_next').onclick = () => lbStep(1);
+$('lb_toggle').onclick = () => setSplit($('lb_range').value === '0' ? 100 : 0);
+$('lb_range').oninput = () => setSplit($('lb_range').value);
+document.addEventListener('keydown', (e) => {
+  if (!$('lightbox').classList.contains('open')) return;
+  if (e.key === 'Escape') closeLightbox();
+  else if (e.key === 'ArrowLeft') lbStep(-1);
+  else if (e.key === 'ArrowRight') lbStep(1);
+  else if (e.key === ' ') { e.preventDefault(); setSplit($('lb_range').value === '0' ? 100 : 0); }
+});
 
 $('export').onclick = async () => {
   $('exportmsg').textContent = 'exporting…';
@@ -374,35 +576,6 @@ $('sheet').onclick = async () => {
     const r = await api('/contactsheet', {job_id: jobId});
     $('exportmsg').textContent = `${r.photos} photos on ${r.pages} page(s): ${r.to}`;
   } catch (e) { $('exportmsg').textContent = e.message; }
-};
-
-$('pause').onclick = async () => {
-  try {
-    await api('/pause', {job_id: jobId});
-    $('stagename').textContent = 'pausing — finishing the current photo…';
-  } catch (e) { $('startmsg').textContent = e.message; }
-};
-
-$('resume').onclick = async () => {
-  try {
-    const r = await api('/resume', {job_id: jobId});
-    running = true;
-    show($('review'), false); show($('queuewrap'), false);
-    startPolling();
-  } catch (e) { $('startmsg').textContent = e.message; }
-};
-
-$('deletejob').onclick = async () => {
-  const sel = $('history');
-  const id = sel.value;
-  if (!id || !confirm(`Delete job ${id} and all its files?`)) return;
-  try {
-    await api('/delete', {job_id: id});
-    await loadHistory();
-    if (jobId === id) { jobId = sel.value || null; }
-    if (jobId) renderDone({id: jobId});
-    else { $('gallery').innerHTML = ''; show($('review'), false); show($('out'), false); }
-  } catch (e) { $('startmsg').textContent = e.message; }
 };
 
 async function loadHistory() {
@@ -429,9 +602,9 @@ $('history').onchange = async () => {
   jobId = $('history').value;
   running = false;
   clearInterval(pollTimer);
+  renderedCards.clear();
   const meta = (window.__historyJobs || {})[jobId];
   if (meta && ['paused', 'interrupted'].includes(meta.status)) {
-    // offer Resume for jobs that have unfinished work
     show($('run'), true);
     $('stagename').textContent = meta.status === 'paused' ? 'paused' : 'interrupted — can resume';
     show($('resume'), true); show($('pause'), false);
@@ -439,16 +612,37 @@ $('history').onchange = async () => {
   }
   try {
     const s = await api('/status?job_id=' + jobId);
-    if (s.job) renderDone(s.job);
+    if (s.job) { renderDone(s.job); showWarnings(s.job); }
   } catch (e) { /* keep whatever rendered */ }
+};
+
+$('deletejob').onclick = async () => {
+  const sel = $('history');
+  const id = sel.value;
+  if (!id || !confirm(`Delete job ${id} and all its files?`)) return;
+  try {
+    await api('/delete', {job_id: id});
+    renderedCards.clear();
+    await loadHistory();
+    jobId = sel.value || null;
+    if (jobId) {
+      const s = await api('/status?job_id=' + jobId);
+      if (s.job) renderDone(s.job);
+    } else {
+      $('gallery').innerHTML = ''; show($('review'), false); show($('out'), false);
+    }
+  } catch (e) { $('startmsg').textContent = e.message; }
 };
 
 $('push').onclick = async () => {
   const msg = $('immichmsg');
   msg.textContent = 'pushing…';
   try {
-    const r = await api('/immich', {job_id: jobId, base_url: $('immich_url').value.trim(),
-                                    api_key: $('immich_key').value});
+    const body = {job_id: jobId, base_url: $('immich_url').value.trim(),
+                  api_key: $('immich_key').value};
+    const album = $('immich_album').value.trim();
+    if (album) body.album_name = album;
+    const r = await api('/immich', body);
     msg.textContent = `album "${r.album}": ${r.uploaded} uploaded, ${r.already_in_album} already there` +
       (r.retry_queued ? `, ${r.retry_queued} QUEUED FOR RETRY — push again later` : '');
   } catch (e) { msg.textContent = e.message; }
@@ -456,6 +650,15 @@ $('push').onclick = async () => {
 
 initStatus();
 loadHistory();
+
+// deep-link: /#lightbox opens the first photo of the current job large
+if (location.hash === '#lightbox') {
+  history.replaceState(null, '', location.pathname);
+  const iv = setInterval(() => {
+    if (displayPairs.length) { clearInterval(iv); openLightbox(displayPairs[0].name); }
+  }, 300);
+  setTimeout(() => clearInterval(iv), 20000);
+}
 </script>
 </body>
 </html>

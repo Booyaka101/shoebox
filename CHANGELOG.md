@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.5 — 2026-10-04
+
+UI/UX round.
+
+- **Lightbox viewer**: click *View large* (or double-click a photo) to inspect
+  at full size with the before/after split; A|B toggle, slider, ←/→ to move
+  between photos, Space to flip, Esc to close.
+- **Live gallery**: finished photos appear in the review grid while the job
+  is still running, instead of only at the end.
+- **Filter tabs** (All / Clean / Flagged) above the gallery for large batches.
+- **"Use 5 sample photos"** button fills the form with the bundled
+  public-domain samples for a first try.
+- Immich album name field; job warnings now visible in the UI; gallery sorted
+  by filename instead of completion order; hover states on buttons.
+- Tests: 36/36.
+
 ## 1.0.4 — 2026-10-04
 
 Fourth loop: history and recovery across restarts.

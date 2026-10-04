@@ -42,12 +42,18 @@ http://127.0.0.1:8545 in your browser.
 2. Choose a preset (below), whether to colorize black & white photos, and
    whether to upscale the background 2x.
 3. Click **Start**. Progress shows the current stage and photo.
-4. Review the gallery — drag left/right on any photo to compare.
+4. Review the gallery — drag left/right on any photo to compare, click **View
+   large** (or double-click) to inspect full size (Left/Right arrows move
+   between photos, Space flips sides). Filter with All / Clean / Flagged.
+   Photos appear in the grid as they finish — no need to wait for the batch.
 5. Photos with a red flag are queued at the bottom; re-run them at higher
    fidelity if you like, or ignore the flag.
 6. **Export** copies the restored set (with sidecar JSONs) and its
    **contact-sheet PDF** to the job's export area, and **Push to Immich**
    uploads the restored set to your own Immich server.
+
+Not sure where to start? **Use 5 sample photos** fills the form with bundled
+public-domain scans so you can watch a full run in about a minute.
 
 Jobs can **Pause** (stops after the current photo; **Resume** finishes the
 rest into the same job) and several folders can be **queued** — they run
