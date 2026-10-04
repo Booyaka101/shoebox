@@ -210,8 +210,12 @@ $('start').onclick = async () => {
       preset, colorize: $('colorize').checked, upscale_bg: $('upscale').checked,
     });
     jobId = r.job_id; running = true;
+    if (r.queued_behind > 0) $('startmsg').textContent =
+      `Queued behind ${r.queued_behind} job(s) — it will start automatically.`;
     show($('run'), true); show($('review'), false); show($('queuewrap'), false); show($('out'), false);
     $('gallery').innerHTML = ''; $('queue').innerHTML = '';
+    $('bar').style.width = '0%';
+    $('stagename').textContent = 'queued';
     startPolling();
   } catch (e) { $('startmsg').textContent = e.message; }
   btn.disabled = false;
@@ -232,12 +236,12 @@ function fmtDuration(sec) {
 }
 
 async function poll() {
+  if (!jobId) return;
   let s;
-  try { s = await api('/status'); } catch (e) { return; }
+  try { s = await api('/status?job_id=' + jobId); } catch (e) { return; }
   if (s.device_warning) banner(s.device_warning);
   const job = s.job;
   if (!job) return;
-  jobId = job.id;
 
   const dl = s.downloading && Object.entries(s.downloading)[0];
   if (dl) {
@@ -253,8 +257,11 @@ async function poll() {
 
   const active = ['queued','running'].includes(job.status);
   const isPaused = job.status === 'paused';
-  show($('run'), active || isPaused || job.total > 0);
-  $('stagename').textContent = job.status === 'paused' ? 'paused' : job.stage;
+  const resumable = isPaused || job.status === 'interrupted';
+  show($('run'), active || resumable || job.total > 0);
+  $('stagename').textContent = job.status === 'paused' ? 'paused'
+    : job.status === 'interrupted' ? 'interrupted — can resume'
+    : job.stage;
   $('stagecount').textContent = `${job.stage_done||0}/${job.stage_total||job.total||0}`;
   const frac = job.stage_total ? (job.stage_done / job.stage_total) : 0;
   $('bar').style.width = Math.round(100 * frac) + '%';
@@ -265,7 +272,7 @@ async function poll() {
   $('s_flagged').textContent = sum.flagged;
   $('s_skipped').textContent = sum.skipped;
   if (sum.cancelled) { show($('s_cancelled_wrap'), true); $('s_cancelled').textContent = sum.cancelled; }
-  const elapsed = (job.finished || Date.now()/1000) - (job.started || Date.now()/1000);
+  const elapsed = ((job.finished || Date.now()/1000) - (job.started || Date.now()/1000)) || 0;
   let eta = '';
   if (active && job.done > 0 && job.total > job.done) {
     eta = ` · ~${fmtDuration((job.total - job.done) * elapsed / job.done)} left`;
@@ -274,9 +281,9 @@ async function poll() {
   $('cancel').disabled = !active;
   $('pause').disabled = !active;
   show($('pause'), active);
-  show($('resume'), isPaused);
+  show($('resume'), resumable);
 
-  if (!active && running && !isPaused) { running = false; clearInterval(pollTimer); renderDone(job); }
+  if (!active && running && !resumable) { running = false; clearInterval(pollTimer); renderDone(job); }
   if (isPaused && running) { running = false; clearInterval(pollTimer); renderDone(job); }
 }
 
@@ -405,11 +412,13 @@ async function loadHistory() {
     sel.innerHTML = '';
     if (!r.jobs.length) { show($('historyrow'), false); return; }
     show($('historyrow'), true);
+    window.__historyJobs = {};
     for (const j of r.jobs) {
       const opt = document.createElement('option');
       const s = j.summary || {};
       opt.value = j.id;
       opt.textContent = `${j.id} — ${j.folder_name || ''} (${j.status}, ${s.restored || 0} restored)`;
+      window.__historyJobs[j.id] = j;
       sel.appendChild(opt);
     }
     if (jobId) sel.value = jobId;
@@ -420,9 +429,18 @@ $('history').onchange = async () => {
   jobId = $('history').value;
   running = false;
   clearInterval(pollTimer);
-  let s;
-  try { s = await api('/status'); } catch (e) { return; }
-  renderDone({id: jobId, skipped: s.job && s.job.skipped, cancelled: s.job && s.job.cancelled});
+  const meta = (window.__historyJobs || {})[jobId];
+  if (meta && ['paused', 'interrupted'].includes(meta.status)) {
+    // offer Resume for jobs that have unfinished work
+    show($('run'), true);
+    $('stagename').textContent = meta.status === 'paused' ? 'paused' : 'interrupted — can resume';
+    show($('resume'), true); show($('pause'), false);
+    $('cancel').disabled = true;
+  }
+  try {
+    const s = await api('/status?job_id=' + jobId);
+    if (s.job) renderDone(s.job);
+  } catch (e) { /* keep whatever rendered */ }
 };
 
 $('push').onclick = async () => {

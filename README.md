@@ -54,6 +54,12 @@ rest into the same job) and several folders can be **queued** — they run
 one at a time in submission order, so you can line up an evening of
 shoeboxes before bed. Old jobs can be deleted from the history dropdown.
 
+If the app is closed mid-run, the job shows up as *interrupted* on the next
+start with a **Resume** button — shoebox works out which photos never
+finished and processes only those. Every past job in the history dropdown
+stays openable (gallery, export, contact sheet, Immich push) across
+restarts.
+
 Each photo is written to disk the moment it finishes, so closing the app
 mid-job keeps the work — the job shows up as *interrupted* on the next
 start and everything else keeps working. Memory use stays flat no matter

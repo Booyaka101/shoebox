@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.4 — 2026-10-04
+
+Fourth loop: history and recovery across restarts.
+
+- Every past job now opens after closing and reopening the app — the history
+  dropdown, gallery, export, contact sheet and Immich push all work from the
+  job's files on disk (previously only the newest job survived a restart).
+- **Resume after a crash.** An *interrupted* job (the app was closed
+  mid-run) can now be resumed: shoebox works out which photos never
+  finished and processes exactly those into the same job.
+- `/status` accepts `?job_id=`, so the UI follows the selected job instead
+  of always the newest one; the Resume button is offered for paused and
+  interrupted jobs.
+- Job ids are path-sanitized; contact sheets decode large JPEGs at thumbnail
+  resolution (faster builds) and use a real font for captions.
+- One worker thread for the life of the process instead of one per UI
+  session.
+- Tests: 36 (restart survival, interrupted-resume, path-safety, empty-job
+  contact sheet).
+
 ## 1.0.3 — 2026-10-03
 
 Third loop: the batch-workflow release.

@@ -1,8 +1,24 @@
 # PROGRESS — shoebox
 
-Status: **v1.0.3 complete and verified end-to-end.** (2026-10-03)
+Status: **v1.0.4 complete and verified end-to-end.** (2026-10-04)
 
-## 1.0.3 review loop (this round)
+## 1.0.4 review loop (this round)
+
+- History across restarts: every past job opens from disk after a restart
+  (gallery, export, contact sheet, Immich) — previously only the newest
+  survived and older ones 404'd. Job ids are path-sanitized.
+- Resume after a crash: `/resume` now also accepts interrupted jobs and
+  computes the outstanding photos (results/skips subtracted from the
+  folder). Verified by restart-simulation tests.
+- `/status?job_id=` so the UI follows the selected job (a resumed old job is
+  not the newest); Resume button offered for paused and interrupted jobs.
+- Worker singleton (one for the process, not one per UI session);
+  contact-sheet thumbnails decode large JPEGs at draft resolution and
+  captions use a real font.
+- Tests: 36/36 (restart survival, interrupted-resume, path-safety,
+  empty-job contact sheet).
+
+## 1.0.3 review loop
 
 - Pause/resume: pause stops after the current photo and records the
   remainder; resume finishes it into the same job. Verified live with real

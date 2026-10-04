@@ -41,6 +41,10 @@ def _fake_run_pipeline(paths, preset, colorize, upscale_bg, sink,
             work_state['stage_done'] = i
             work_state['stage_total'] = len(paths)
             work_state['current'] = p.name
+        if p.name.startswith('broken'):
+            out.append({'name': p.name, 'status': 'skipped', 'src_hash': 'f' * 64,
+                        'reason': 'unreadable: fake'})
+            continue
         if pause and pause.get('flag'):
             out.append({'name': p.name, 'status': 'paused', 'src_hash': 'f' * 64})
             continue
@@ -295,3 +299,99 @@ def test_contactsheet_builds_pdf(client, tmp_path):
     assert r.json()['pages'] == 1 and r.json()['photos'] == 3
     pdf = Path(app_main.RESULTS_DIR) / job_id / 'contact-sheet.pdf'
     assert pdf.read_bytes()[:5] == b'%PDF-'
+
+
+def test_contactsheet_empty_job_is_400(client, tmp_path):
+    # a folder whose only file is unreadable: nothing restored, no sheet
+    folder = tmp_path / 'empty-scans'
+    folder.mkdir()
+    (folder / 'broken.jpg').write_bytes(b'junk')
+    job_id = client.post('/jobs', json={'folder': str(folder), 'preset': 'low'}).json()['job_id']
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        job = client.get('/status', params={'job_id': job_id}).json()['job']
+        if job['status'] in ('done', 'error'):
+            break
+        time.sleep(0.05)
+    r = client.post('/contactsheet', json={'job_id': job_id})
+    assert r.status_code == 400
+
+
+def test_old_job_opens_after_restart(client, tmp_path):
+    """Two jobs on disk, then a 'restart' (fresh JOBS, only the newest
+    reloaded): the older job must still open from disk."""
+    shared = tmp_path / 'results'
+    shared.mkdir(exist_ok=True)  # the client fixture already created it
+    folder_a = tmp_path / 'a'
+    folder_a.mkdir()
+    (folder_a / 'old.jpg').write_bytes(b'x' * 10)
+    folder_b = tmp_path / 'b'
+    folder_b.mkdir()
+    (folder_b / 'new.jpg').write_bytes(b'y' * 10)
+
+    import unittest.mock as mock
+    with mock.patch.object(app_main, 'RESULTS_DIR', shared), \
+         mock.patch.object(app_main, 'JOBS', {}), \
+         mock.patch.object(app_main, '_active_job_id', None), \
+         TestClient(app_main.app) as c:
+        old_id = c.post('/jobs', json={'folder': str(folder_a), 'preset': 'low'}).json()['job_id']
+        _wait_status(c, old_id, ('done',), timeout=30)
+        new_id = c.post('/jobs', json={'folder': str(folder_b), 'preset': 'low'}).json()['job_id']
+        _wait_status(c, new_id, ('done',), timeout=30)
+
+    # 'restart': empty in-memory state; startup reloads only the newest job
+    with mock.patch.object(app_main, 'RESULTS_DIR', shared), \
+         mock.patch.object(app_main, 'JOBS', {}), \
+         mock.patch.object(app_main, '_active_job_id', None), \
+         TestClient(app_main.app) as c2:
+        latest = c2.get('/status').json()['job']['id']
+        assert latest == new_id
+        # the older job is NOT in memory — disk fallback must serve it
+        r = c2.get('/pairs', params={'job_id': old_id})
+        assert r.status_code == 200, 'history must survive a restart'
+        assert r.json()['pairs'][0]['name'] == 'old.jpg'
+        st = c2.get('/status', params={'job_id': old_id}).json()['job']
+        assert st['id'] == old_id
+
+
+def test_resume_interrupted_job_processes_the_rest(client, tmp_path):
+    """Crash mid-job: the interrupted job (reloaded from disk) resumes and
+    processes exactly the photos that never finished."""
+    import unittest.mock as mock
+    shared = tmp_path / 'results'
+    job_dir = shared / '20260101-000000-cafe01'
+    (job_dir / 'restored').mkdir(parents=True)
+    folder = tmp_path / 'scans'
+    folder.mkdir()
+    for i in range(4):
+        (folder / f'r{i}.jpg').write_bytes(b'x' * 10)
+
+    # hand-craft the crashed state: 2 of 4 photos were done when it died
+    done = [{'name': f'r{i}.jpg', 'output': f'r{i}_restored.png', 'flags': []}
+            for i in range(2)]
+    (job_dir / 'job.json').write_text(json.dumps({
+        'id': job_dir.name, 'folder': str(folder), 'folder_name': 'scans',
+        'preset': 'low', 'colorize': True, 'upscale_bg': False,
+        'status': 'running', 'started': 1.0, 'done': 2, 'total': 4,
+        'results': done, 'skipped': [], 'cancelled': [], 'warnings': [],
+        'summary': {'restored': 2, 'flagged': 0, 'skipped': 0, 'cancelled': 0},
+    }))
+    for i in range(2):
+        (job_dir / 'restored' / f'r{i}_restored.png').write_bytes(b'png')
+
+    with mock.patch.object(app_main, 'RESULTS_DIR', shared), \
+         mock.patch.object(app_main, 'JOBS', {}), \
+         mock.patch.object(app_main, '_active_job_id', None), \
+         TestClient(app_main.app) as c:
+        job = c.get('/status', params={'job_id': job_dir.name}).json()['job']
+        assert job['status'] == 'interrupted'
+        r = c.post('/resume', json={'job_id': job_dir.name})
+        assert r.status_code == 200, r.text
+        job = _wait_status(c, job_dir.name, ('done',), timeout=30)
+        assert job['summary']['restored'] == 4, 'resume must finish every photo'
+        assert job['remaining'] == []
+
+
+def test_get_job_rejects_traversal_ids(client):
+    for bad in ('../x', 'a\\b', '.hidden'):
+        assert client.get('/pairs', params={'job_id': bad}).status_code == 404

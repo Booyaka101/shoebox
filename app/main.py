@@ -48,7 +48,7 @@ WEB_DIR = PROJECT_ROOT / 'web'
 async def lifespan(_app):
     RESULTS_DIR.mkdir(exist_ok=True)
     _load_last_job()
-    threading.Thread(target=_worker, daemon=True).start()
+    _ensure_worker()
     yield
 
 
@@ -59,6 +59,18 @@ JOBS = {}            # job_id -> job dict (also mirrored to job.json)
 JOBS_LOCK = threading.Lock()
 _active_job_id = None
 _job_queue: queue.Queue = queue.Queue()
+_worker_started = False
+
+
+def _ensure_worker():
+    """One worker for the life of the process — TestClients create a lifespan
+    each, and piling up a thread per client is pure waste."""
+    global _worker_started
+    with JOBS_LOCK:
+        if _worker_started:
+            return
+        _worker_started = True
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 def _worker():
@@ -128,9 +140,30 @@ def _load_last_job():
 def _get_job(job_id: str) -> dict:
     with JOBS_LOCK:
         job = JOBS.get(job_id)
-    if job is None:
+    if job is not None:
+        return job
+    # not in memory (e.g. an older job after a restart): load from disk
+    if '/' in job_id or '\\' in job_id or job_id.startswith('.'):
         raise HTTPException(404, f'unknown job {job_id}')
-    return job
+    meta = _job_dir(job_id) / 'job.json'
+    if not meta.is_file():
+        raise HTTPException(404, f'unknown job {job_id}')
+    try:
+        loaded = json.loads(meta.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        raise HTTPException(404, f'job record for {job_id} is unreadable')
+    loaded.setdefault('cancel', {'flag': False})
+    loaded.setdefault('pause', {'flag': False})
+    if loaded.get('status') in ('queued', 'running'):
+        loaded['status'] = 'interrupted'
+        loaded.setdefault('warnings', []).append(
+            'the app was closed while this job was running; photos already '
+            'written to restored/ are kept')
+    with JOBS_LOCK:
+        JOBS[loaded['id']] = loaded
+        if _active_job_id is None:
+            pass  # _active_job_id tracking only matters for /status
+    return loaded
 
 
 def _latest_job() -> dict:
@@ -162,8 +195,9 @@ def _make_sink(job, job_dir):
         job['summary'] = {'restored': len(job['results']), 'flagged': flagged,
                           'skipped': len(job['skipped']),
                           'cancelled': len(job['cancelled'])}
-        if job['done'] % 5 == 0:
-            _save_job(job, job_dir)
+        # every photo: job.json is tiny and this is what makes a crash keep
+        # the completed set (and resume skip it)
+        _save_job(job, job_dir)
 
     return sink
 
@@ -284,9 +318,9 @@ def create_job(req: JobRequest):
 
 
 @app.get('/status')
-def status():
+def status(job_id: str = None):
     try:
-        job = _latest_job()
+        job = _get_job(job_id) if job_id else _latest_job()
     except HTTPException:
         job = None
     payload = {
@@ -393,9 +427,18 @@ def pause(req: PauseRequest):
 @app.post('/resume')
 def resume(req: PauseRequest):
     job = _get_job(req.job_id)
-    if job['status'] != 'paused':
+    if job['status'] not in ('paused', 'interrupted'):
         raise HTTPException(409, f'cannot resume a {job["status"]} job')
     if not job.get('remaining'):
+        # interrupted by a crash or restart: outstanding = sources with no
+        # result and no skip record
+        folder = Path(job['folder'])
+        handled = ({r['name'] for r in job.get('results', [])}
+                   | {s['name'] for s in job.get('skipped', [])}
+                   | set(job.get('cancelled', [])))
+        job['remaining'] = [p.name for p in pipeline.find_images(folder)
+                            if p.name not in handled]
+    if not job['remaining']:
         raise HTTPException(400, 'nothing left to resume — every photo was processed')
     job['status'] = 'queued'
     job['stage'] = 'queued'

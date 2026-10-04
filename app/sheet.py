@@ -6,7 +6,7 @@ Pillow draws the grid and writes the multi-page PDF; no other dependency.
 import logging
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 log = logging.getLogger(__name__)
 
@@ -17,10 +17,27 @@ MARGIN = 18
 PAGE_W = MARGIN * 2 + COLS * CELL_W
 PAGE_H = MARGIN * 2 + ROWS * (CELL_H + CAPTION)
 
+_font = None
+
+
+def _caption_font():
+    global _font
+    if _font is None:
+        for name in ('arial.ttf', 'segoeui.ttf'):
+            try:
+                _font = ImageFont.truetype(name, 15)
+                break
+            except OSError:
+                continue
+        if _font is None:
+            _font = ImageFont.load_default()
+    return _font
+
 
 def build(files, out_path: Path, per_page: int = COLS * ROWS) -> int:
     """Write a paginated PDF of labelled thumbnails; returns the page count."""
     pages = []
+    font = _caption_font()
     for start in range(0, len(files), per_page):
         page = Image.new('RGB', (PAGE_W, PAGE_H), (18, 20, 24))
         draw = ImageDraw.Draw(page)
@@ -31,6 +48,9 @@ def build(files, out_path: Path, per_page: int = COLS * ROWS) -> int:
             y = MARGIN + row * (CELL_H + CAPTION)
             try:
                 with Image.open(path) as im:
+                    # draft() decodes large JPEGs at reduced resolution,
+                    # which is all a thumbnail needs
+                    im.draft('RGB', (CELL_W * 2, CELL_H * 2))
                     thumb = im.convert('RGB')
                     thumb.thumbnail((CELL_W - 8, CELL_H - 8))
                     px = x + (CELL_W - thumb.width) // 2
@@ -41,7 +61,8 @@ def build(files, out_path: Path, per_page: int = COLS * ROWS) -> int:
             caption = Path(path).name
             if len(caption) > 42:
                 caption = caption[:39] + '...'
-            draw.text((x + 4, y + CELL_H + 8), caption, fill=(224, 168, 60))
+            draw.text((x + 4, y + CELL_H + 8), caption, fill=(224, 168, 60),
+                      font=font)
         pages.append(page)
     if not pages:
         raise ValueError('no pages to write')
